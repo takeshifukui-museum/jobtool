@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>jobtool</title>
+</head>
+<body>
+  <textarea id="input" rows="10" cols="50"></textarea><br>
+  <button onclick="check()">判定</button>
+  <div id="result"></div>
+
+  <script>
+    const keywords = ['給与', '勤務地', '仕事内容'];
+
+    function check() {
+      const text = document.getElementById('input').value;
+      const result = keywords.map(k => k + ': ' + (text.includes(k) ? 'Yes' : 'No')).join('<br>');
+      document.getElementById('result').innerHTML = result;
+    }
+  </script>
+</body>
+</html>
