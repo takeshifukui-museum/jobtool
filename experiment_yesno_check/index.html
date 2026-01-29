@@ -1,29 +1,1495 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8">
-  <title>experiment</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SD Prompt Builder（チェック式）</title>
+  <style>
+    :root{
+      --bg:#0b0f14; --panel:#121824; --panel2:#0f1520; --text:#e7eefc; --muted:#9db0d0;
+      --line:#233047; --accent:#38bdf8; --danger:#fb7185; --ok:#34d399; --warn:#fbbf24;
+      --btn:#1b2536; --btn2:#192235;
+      --radius:14px;
+      --shadow: 0 10px 30px rgba(0,0,0,.35);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", sans-serif;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; font-family:var(--sans); color:var(--text);
+      background: radial-gradient(1200px 600px at 20% 0%, #132039 0%, var(--bg) 55%) fixed;
+    }
+    .wrap{max-width:1100px; margin:24px auto; padding:0 16px 28px;}
+    header{
+      display:flex; align-items:flex-end; justify-content:space-between; gap:12px; margin-bottom:14px;
+    }
+    h1{font-size:18px; margin:0; letter-spacing:.2px;}
+    .sub{color:var(--muted); font-size:12px; margin-top:4px}
+    .top-actions{display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end}
+    button{
+      border:1px solid var(--line);
+      background:linear-gradient(180deg, var(--btn) 0%, var(--btn2) 100%);
+      color:var(--text);
+      padding:10px 12px; border-radius:12px; cursor:pointer;
+      box-shadow: 0 6px 16px rgba(0,0,0,.22);
+      font-size:13px;
+    }
+    button:hover{border-color:#2f4270}
+    button:active{transform: translateY(1px)}
+    button.primary{border-color: rgba(56,189,248,.55)}
+    button.danger{border-color: rgba(251,113,133,.55)}
+    button.ghost{background:transparent; box-shadow:none}
+    button.small{padding:6px 9px; border-radius:10px; font-size:12px}
+    button.icon{padding:6px 9px; border-radius:10px; font-size:12px}
+    .grid{
+      display:grid; grid-template-columns: 1.25fr 1fr; gap:14px;
+    }
+    @media (max-width: 980px){
+      .grid{grid-template-columns:1fr}
+    }
+    .panel{
+      background: linear-gradient(180deg, rgba(255,255,255,.03) 0%, rgba(255,255,255,.015) 100%);
+      border:1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    .panel-h{
+      padding:12px 14px; border-bottom:1px solid var(--line);
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+      background: rgba(255,255,255,.02);
+    }
+    .panel-h .title{font-weight:700; font-size:13px}
+    .panel-h .right{display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end}
+    .panel-b{padding:12px 14px}
+    .tabs{display:flex; gap:8px; flex-wrap:wrap}
+    .tab{
+      padding:8px 10px; border-radius:12px; border:1px solid var(--line);
+      color:var(--muted); cursor:pointer; font-size:12px; user-select:none;
+      background: rgba(0,0,0,.15);
+    }
+    .tab.active{border-color: rgba(56,189,248,.6); color:var(--text); box-shadow: 0 0 0 2px rgba(56,189,248,.08) inset}
+    .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .search{
+      width:100%;
+      padding:10px 12px; border-radius:12px; border:1px solid var(--line);
+      background: rgba(0,0,0,.18); color:var(--text);
+      outline:none;
+    }
+    .search::placeholder{color:#7d93ba}
+    .list{display:flex; flex-direction:column; gap:10px; margin-top:12px}
+    .item{
+      border:1px solid var(--line); border-radius:14px; padding:10px 10px;
+      background: rgba(0,0,0,.12);
+      display:grid; grid-template-columns: 26px 1fr auto; gap:10px; align-items:center;
+    }
+    .item.hidden{opacity:.45}
+    .item .meta{
+      display:flex; flex-direction:column; gap:3px;
+      min-width:0;
+    }
+    .item .label{
+      font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .item .token{
+      font-family:var(--mono); font-size:12px; color:var(--muted);
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .item .actions{display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end}
+    input[type="checkbox"]{width:16px; height:16px}
+    .badge{
+      display:inline-flex; align-items:center; gap:6px;
+      padding:3px 8px; border-radius:999px;
+      border:1px solid var(--line); color:var(--muted);
+      font-size:11px; background: rgba(0,0,0,.12);
+    }
+    .badge.pos{border-color: rgba(52,211,153,.45); color:#bdf7dd}
+    .badge.neg{border-color: rgba(251,113,133,.45); color:#ffd0d8}
+    .split{display:grid; grid-template-columns:1fr; gap:12px}
+    .area{
+      width:100%; min-height:120px;
+      background: rgba(0,0,0,.18);
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:12px;
+      color:var(--text);
+      font-family: var(--mono);
+      font-size:12px;
+      line-height:1.45;
+      resize:vertical;
+      outline:none;
+    }
+    .area::placeholder{color:#7d93ba; font-family:var(--sans)}
+    .kpi{
+      display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+      color:var(--muted); font-size:12px;
+    }
+    .toast{
+      position:fixed; right:14px; bottom:14px;
+      padding:10px 12px; border-radius:12px;
+      background: rgba(15,21,32,.92);
+      border:1px solid var(--line);
+      box-shadow: var(--shadow);
+      color: var(--text);
+      font-size:12px;
+      opacity:0; transform: translateY(10px);
+      pointer-events:none;
+      transition: .18s ease;
+    }
+    .toast.show{opacity:1; transform: translateY(0)}
+    /* modal */
+    .modal-backdrop{
+      position:fixed; inset:0; background: rgba(0,0,0,.55);
+      display:none; align-items:center; justify-content:center;
+      padding:16px; z-index:100;
+    }
+    .modal-backdrop.show{display:flex}
+    .modal{
+      width:min(720px, 100%);
+      max-height:90vh;
+      overflow-y:auto;
+      background: rgba(16,22,34,.98);
+      border:1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+    }
+    .modal-h{padding:12px 14px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:10px}
+    .modal-h .t{font-weight:800; font-size:13px}
+    .modal-b{padding:14px}
+    .form{
+      display:grid; grid-template-columns: 1fr 1fr; gap:12px;
+    }
+    @media (max-width: 700px){ .form{grid-template-columns:1fr} }
+    label{font-size:12px; color:var(--muted); display:block; margin-bottom:6px}
+    .inp, select{
+      width:100%;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid var(--line);
+      background: rgba(0,0,0,.18);
+      color:var(--text);
+      outline:none;
+    }
+    .inline{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .hint{font-size:12px; color:var(--muted); margin-top:10px}
+    .modal-f{
+      padding:12px 14px; border-top:1px solid var(--line);
+      display:flex; justify-content:flex-end; gap:10px; flex-wrap:wrap;
+      background: rgba(255,255,255,.02);
+    }
+    .sep{height:1px; background: var(--line); margin:12px 0}
+    /* weight slider */
+    .weight-slider{
+      -webkit-appearance:none;
+      appearance:none;
+      width:180px; height:8px;
+      border-radius:4px;
+      background: linear-gradient(90deg, #38bdf8 0%, #0b0f14 100%);
+      outline:none;
+      cursor:pointer;
+    }
+    .weight-slider::-webkit-slider-thumb{
+      -webkit-appearance:none;
+      appearance:none;
+      width:18px; height:18px;
+      border-radius:50%;
+      background:#e7eefc;
+      border:2px solid #38bdf8;
+      cursor:pointer;
+    }
+    .weight-slider::-moz-range-thumb{
+      width:18px; height:18px;
+      border-radius:50%;
+      background:#e7eefc;
+      border:2px solid #38bdf8;
+      cursor:pointer;
+    }
+    .weight-val{
+      font-family:var(--mono);
+      font-size:12px;
+      min-width:40px;
+      text-align:center;
+    }
+    /* blend ratio slider */
+    .ratio-slider{
+      -webkit-appearance:none;
+      appearance:none;
+      width:180px; height:8px;
+      border-radius:4px;
+      background: linear-gradient(90deg, #0b0f14 0%, #38bdf8 100%);
+      outline:none;
+      cursor:pointer;
+    }
+    .ratio-slider::-webkit-slider-thumb{
+      -webkit-appearance:none;
+      appearance:none;
+      width:18px; height:18px;
+      border-radius:50%;
+      background:#e7eefc;
+      border:2px solid #38bdf8;
+      cursor:pointer;
+    }
+    .ratio-slider::-moz-range-thumb{
+      width:18px; height:18px;
+      border-radius:50%;
+      background:#e7eefc;
+      border:2px solid #38bdf8;
+      cursor:pointer;
+    }
+    /* preset/history list */
+    .preset-list{
+      display:flex; flex-direction:column; gap:8px;
+      max-height:200px; overflow-y:auto;
+      margin-top:10px;
+    }
+    .preset-row{
+      display:flex; align-items:center; gap:8px;
+      padding:8px 10px;
+      border:1px solid var(--line);
+      border-radius:10px;
+      background: rgba(0,0,0,.12);
+    }
+    .preset-row .name{flex:1; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+    /* category manager */
+    .cat-list{
+      display:flex; flex-direction:column; gap:6px;
+      max-height:300px; overflow-y:auto;
+    }
+    .cat-row{
+      display:flex; align-items:center; gap:8px;
+      padding:8px 10px;
+      border:1px solid var(--line);
+      border-radius:10px;
+      background: rgba(0,0,0,.12);
+    }
+    .cat-row .cat-name{flex:1; font-size:13px}
+    .cat-row .cat-inp{
+      flex:1;
+      padding:6px 8px;
+      border-radius:8px;
+      border:1px solid var(--line);
+      background: rgba(0,0,0,.18);
+      color:var(--text);
+      outline:none;
+      font-size:13px;
+    }
+  </style>
 </head>
 <body>
-  <textarea id="input" rows="10" cols="50"></textarea><br>
-  <button onclick="check()">判定</button>
-  <div id="result"></div>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Stable Diffusion系 コマンドプロンプト生成ツール（チェック式）</h1>
+        <div class="sub">タブでカテゴリ切替 → チェックON/OFFでプロンプト自動生成 → コピー。追加項目は weight有無を選べます。</div>
+      </div>
+      <div class="top-actions">
+        <button class="ghost" id="btnExport">設定エクスポート</button>
+        <button class="ghost" id="btnImport">設定インポート</button>
+        <button class="ghost" id="btnClearSelection">選択クリア</button>
+        <button class="danger" id="btnReset">初期化（全削除）</button>
+      </div>
+    </header>
+
+    <div class="grid">
+      <!-- LEFT: tabs + items -->
+      <section class="panel">
+        <div class="panel-h">
+          <div class="title">カテゴリ</div>
+          <div class="right">
+            <button class="small" id="btnManageCategories">カテゴリ管理</button>
+            <button class="primary" id="btnAddItem">＋項目追加</button>
+          </div>
+        </div>
+        <div class="panel-b">
+          <div class="tabs" id="tabs"></div>
+
+          <div style="margin-top:12px" class="row">
+            <input id="search" class="search" placeholder="このカテゴリ内を検索（label / token）" />
+            <span class="badge" id="badgeCount">0 items</span>
+            <span class="badge" id="badgeSelected">0 selected</span>
+          </div>
+
+          <div class="list" id="itemList"></div>
+        </div>
+      </section>
+
+      <!-- RIGHT: output -->
+      <section class="panel">
+        <div class="panel-h">
+          <div class="title">生成結果</div>
+          <div class="right">
+            <button class="small" id="btnSaveHistory">履歴に保存</button>
+            <button class="small" id="btnShowHistory">履歴</button>
+            <button class="small" id="btnShowPresets">プリセット</button>
+          </div>
+        </div>
+        <div class="panel-b split">
+          <div class="kpi">
+            <span class="badge pos">Positive</span>
+            <span id="posStats" class="badge">0 tokens</span>
+            <span class="badge neg">Negative</span>
+            <span id="negStats" class="badge">0 tokens</span>
+          </div>
+
+          <div class="row">
+            <button class="small" id="btnCopyPos">Positiveコピー</button>
+            <button class="small" id="btnCopyNeg">Negativeコピー</button>
+            <button class="primary small" id="btnCopyBoth">両方コピー（2行）</button>
+          </div>
+
+          <textarea id="posOut" class="area" readonly></textarea>
+
+          <textarea id="negOut" class="area" readonly></textarea>
+
+          <div class="sep"></div>
+
+          <div class="row" style="align-items:flex-start">
+            <div style="flex:1; min-width:280px">
+              <label for="freePos">自由追加（Positive）</label>
+              <textarea id="freePos" class="area" placeholder="ここに自由に追記（例：cinematic lighting, rim light など）"></textarea>
+              <div class="inline" style="margin-top:8px">
+                <input type="checkbox" id="muteFreePos">
+                <label for="muteFreePos" style="margin:0; color:var(--muted)">一時OFF（自由Positiveを出力に含めない）</label>
+              </div>
+            </div>
+
+            <div style="flex:1; min-width:280px">
+              <label for="freeNeg">自由追加（Negative）</label>
+              <textarea id="freeNeg" class="area" placeholder="ここに自由に追記（例：bad anatomy, extra digits など）"></textarea>
+              <div class="inline" style="margin-top:8px">
+                <input type="checkbox" id="muteFreeNeg">
+                <label for="muteFreeNeg" style="margin:0; color:var(--muted)">一時OFF（自由Negativeを出力に含めない）</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="hint">
+            ※ 出力は「カテゴリ順」で連結します。<br>
+            ※ weightありの項目は <span style="font-family:var(--mono)">(token:1.20)</span> 形式で出力します。<br>
+            ※ ブレンド項目は <span style="font-family:var(--mono)">(tokenA:0.70), (tokenB:0.30)</span> 形式で出力します。
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- MODAL: Item Add/Edit -->
+  <div class="modal-backdrop" id="modalBackdrop" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-h">
+        <div class="t" id="modalTitle">項目追加</div>
+        <button class="icon" id="btnCloseModal">✕</button>
+      </div>
+      <div class="modal-b">
+        <div class="form">
+          <div>
+            <label>カテゴリ</label>
+            <select id="mCategory"></select>
+          </div>
+          <div>
+            <label>種別</label>
+            <select id="mType">
+              <option value="positive">Positive</option>
+              <option value="negative">Negative</option>
+            </select>
+          </div>
+          <div>
+            <label>表示名（label）</label>
+            <input class="inp" id="mLabel" placeholder="例）青い髪（強調）" />
+          </div>
+
+          <div style="grid-column:1/-1">
+            <label>モード</label>
+            <div class="inline">
+              <label class="inline" style="margin:0; color:var(--muted)">
+                <input type="radio" name="mMode" value="single" checked />
+                シングル（1トークン）
+              </label>
+              <label class="inline" style="margin:0; color:var(--muted)">
+                <input type="radio" name="mMode" value="blend" />
+                ブレンド（2トークン混合）
+              </label>
+            </div>
+          </div>
+
+          <!-- Single mode -->
+          <div id="singleFields" style="grid-column:1/-1">
+            <div style="margin-bottom:12px">
+              <label>出力token（必須）</label>
+              <input class="inp" id="mToken" placeholder="例）blue hair" />
+            </div>
+            <label>weight</label>
+            <div class="inline">
+              <label class="inline" style="margin:0; color:var(--muted)">
+                <input type="radio" name="mWeightMode" value="none" checked />
+                weight無し
+              </label>
+              <label class="inline" style="margin:0; color:var(--muted)">
+                <input type="radio" name="mWeightMode" value="has" />
+                weightあり
+              </label>
+              <input type="range" class="weight-slider" id="mWeightSlider" min="0.10" max="2.00" step="0.05" value="1.00" disabled />
+              <span class="weight-val" id="mWeightVal">1.00</span>
+            </div>
+          </div>
+
+          <!-- Blend mode -->
+          <div id="blendFields" style="grid-column:1/-1; display:none">
+            <div class="form">
+              <div>
+                <label>トークンA</label>
+                <input class="inp" id="mTokenA" placeholder="例）black hair" />
+              </div>
+              <div>
+                <label>トークンB</label>
+                <input class="inp" id="mTokenB" placeholder="例）blue hair" />
+              </div>
+            </div>
+            <div style="margin-top:12px">
+              <label>ブレンド比率（A ← → B）</label>
+              <div class="inline">
+                <span class="weight-val" id="mRatioA">0.50</span>
+                <input type="range" class="ratio-slider" id="mRatioSlider" min="0" max="100" step="1" value="50" />
+                <span class="weight-val" id="mRatioB">0.50</span>
+              </div>
+            </div>
+          </div>
+
+          <div style="grid-column:1/-1">
+            <label>メモ（任意）</label>
+            <input class="inp" id="mNote" placeholder="例）色彩・光系だけweightを使う運用" />
+          </div>
+        </div>
+
+        <div class="hint" style="margin-top:10px">
+          追加した項目は、右側の「編集」から token / weight を変更したり、「非表示」にして一時的に消すことができます。
+        </div>
+      </div>
+      <div class="modal-f">
+        <button class="ghost" id="btnModalCancel">キャンセル</button>
+        <button class="primary" id="btnModalSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Presets -->
+  <div class="modal-backdrop" id="presetBackdrop" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-h">
+        <div class="t">プリセット管理</div>
+        <button class="icon" id="btnClosePreset">✕</button>
+      </div>
+      <div class="modal-b">
+        <div class="inline" style="margin-bottom:12px">
+          <input class="inp" id="presetName" placeholder="プリセット名" style="flex:1" />
+          <button class="primary small" id="btnSavePreset">保存</button>
+          <button class="small" id="btnSavePresetClear">保存してクリア</button>
+        </div>
+        <div class="preset-list" id="presetList"></div>
+        <div class="hint">現在の選択・自由入力・muteを名前付きで保存します。</div>
+      </div>
+      <div class="modal-f">
+        <button class="ghost" id="btnClosePreset2">閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: History -->
+  <div class="modal-backdrop" id="historyBackdrop" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-h">
+        <div class="t">履歴（最大30件）</div>
+        <button class="icon" id="btnCloseHistory">✕</button>
+      </div>
+      <div class="modal-b">
+        <div class="preset-list" id="historyList"></div>
+        <div class="hint">手動で「履歴に保存」を押すと、現在のpos/negテキストを保存します。</div>
+      </div>
+      <div class="modal-f">
+        <button class="ghost" id="btnCloseHistory2">閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Category Manager -->
+  <div class="modal-backdrop" id="catBackdrop" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-h">
+        <div class="t">カテゴリ管理</div>
+        <button class="icon" id="btnCloseCat">✕</button>
+      </div>
+      <div class="modal-b">
+        <div class="inline" style="margin-bottom:12px">
+          <input class="inp" id="newCatName" placeholder="新しいカテゴリ名" style="flex:1" />
+          <button class="primary small" id="btnAddCat">追加</button>
+        </div>
+        <div class="cat-list" id="catList"></div>
+        <div class="hint">カテゴリの順序はプロンプト出力順に影響します。</div>
+      </div>
+      <div class="modal-f">
+        <button class="ghost" id="btnCloseCat2">キャンセル</button>
+        <button class="primary" id="btnSaveCat">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
 
   <script>
-    const items = [
-      { name: '年収に関する記載', keywords: ['年収', '給与', '月給', '賞与'] },
-      { name: '業務内容に関する記載', keywords: ['業務内容', '仕事内容', '職務内容', '担当業務'] },
-      { name: '必須スキル/歓迎スキルに関する記載', keywords: ['必須スキル', '歓迎スキル', '必須条件', '歓迎条件', '応募資格'] }
+    /**********************
+     *  Stable Diffusion Prompt Builder v2
+     *  - Single HTML file
+     *  - Tabs / checkbox
+     *  - Add/Edit/Hide/Delete items
+     *  - Weight slider
+     *  - Blend mode (tokenA/tokenB with ratio)
+     *  - Presets (named)
+     *  - History (max 30)
+     *  - Category manager
+     *  - localStorage persistence
+     **********************/
+
+    const STORAGE_KEY = "sd_prompt_builder_v2";
+
+    // ---- Default Category order (output priority)
+    const DEFAULT_CATEGORIES = [
+      "人物", "年齢", "人種・肌", "顔・表情", "髪", "服装", "ポーズ",
+      "構図・アングル", "背景", "光・色", "スタイル", "品質", "ネガティブ"
     ];
 
-    function check() {
-      const text = document.getElementById('input').value;
-      const result = items.map(item => {
-        const found = item.keywords.some(k => text.includes(k));
-        return item.name + '：' + (found ? 'Yes' : 'No');
-      }).join('<br>');
-      document.getElementById('result').innerHTML = result;
+    // ---- Default items
+    const DEFAULT_ITEMS = [
+      { id:"p1", category:"人物", type:"positive", label:"1girl", token:"1girl", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"p2", category:"人物", type:"positive", label:"1boy", token:"1boy", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"p3", category:"人物", type:"positive", label:"2girls", token:"2girls", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"a1", category:"年齢", type:"positive", label:"teen", token:"teen", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"a2", category:"年齢", type:"positive", label:"adult", token:"adult", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"s1", category:"人種・肌", type:"positive", label:"light skin", token:"light skin", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"s2", category:"人種・肌", type:"positive", label:"tan", token:"tan", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"s3", category:"人種・肌", type:"positive", label:"dark skin", token:"dark skin", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"f1", category:"顔・表情", type:"positive", label:"smile", token:"smile", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"f2", category:"顔・表情", type:"positive", label:"serious", token:"serious", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"f3", category:"顔・表情", type:"positive", label:"looking at viewer", token:"looking at viewer", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"h1", category:"髪", type:"positive", label:"long hair", token:"long hair", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"h2", category:"髪", type:"positive", label:"short hair", token:"short hair", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"h3", category:"髪", type:"positive", label:"blue hair（※weight向き）", token:"blue hair", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"色・光系はweight運用しやすい" },
+      { id:"c1", category:"服装", type:"positive", label:"school uniform", token:"school uniform", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"c2", category:"服装", type:"positive", label:"suit", token:"suit", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"po1", category:"ポーズ", type:"positive", label:"standing", token:"standing", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"po2", category:"ポーズ", type:"positive", label:"sitting", token:"sitting", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"ca1", category:"構図・アングル", type:"positive", label:"upper body", token:"upper body", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"ca2", category:"構図・アングル", type:"positive", label:"close-up", token:"close-up", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"ca3", category:"構図・アングル", type:"positive", label:"wide shot", token:"wide shot", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"b1", category:"背景", type:"positive", label:"studio background", token:"studio background", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"b2", category:"背景", type:"positive", label:"city street", token:"city street", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"b3", category:"背景", type:"positive", label:"forest", token:"forest", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"l1", category:"光・色", type:"positive", label:"soft lighting（※weight向き）", token:"soft lighting", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"l2", category:"光・色", type:"positive", label:"rim light（※weight向き）", token:"rim light", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"l3", category:"光・色", type:"positive", label:"vibrant colors（※weight向き）", token:"vibrant colors", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"st1", category:"スタイル", type:"positive", label:"anime style", token:"anime style", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"st2", category:"スタイル", type:"positive", label:"illustration", token:"illustration", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"st3", category:"スタイル", type:"positive", label:"photorealistic", token:"photorealistic", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"q1", category:"品質", type:"positive", label:"masterpiece", token:"masterpiece", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"q2", category:"品質", type:"positive", label:"best quality", token:"best quality", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"q3", category:"品質", type:"positive", label:"highly detailed", token:"highly detailed", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"n1", category:"ネガティブ", type:"negative", label:"worst quality", token:"worst quality", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"n2", category:"ネガティブ", type:"negative", label:"low quality", token:"low quality", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"n3", category:"ネガティブ", type:"negative", label:"blurry", token:"blurry", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"n4", category:"ネガティブ", type:"negative", label:"bad anatomy", token:"bad anatomy", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"n5", category:"ネガティブ", type:"negative", label:"extra fingers", token:"extra fingers", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+    ];
+
+    // ---- State
+    let state = {
+      categories: [],
+      items: [],
+      selectedIds: [],
+      activeCategory: "",
+      search: "",
+      freePos: "",
+      freeNeg: "",
+      muteFreePos: false,
+      muteFreeNeg: false,
+      presets: [],
+      history: []
+    };
+
+    // temp state for category manager
+    let tempCategories = [];
+
+    // ---- DOM refs
+    const $tabs = document.getElementById("tabs");
+    const $itemList = document.getElementById("itemList");
+    const $search = document.getElementById("search");
+    const $badgeCount = document.getElementById("badgeCount");
+    const $badgeSelected = document.getElementById("badgeSelected");
+    const $posOut = document.getElementById("posOut");
+    const $negOut = document.getElementById("negOut");
+    const $posStats = document.getElementById("posStats");
+    const $negStats = document.getElementById("negStats");
+    const $freePos = document.getElementById("freePos");
+    const $freeNeg = document.getElementById("freeNeg");
+    const $muteFreePos = document.getElementById("muteFreePos");
+    const $muteFreeNeg = document.getElementById("muteFreeNeg");
+
+    // item modal
+    const $modalBackdrop = document.getElementById("modalBackdrop");
+    const $modalTitle = document.getElementById("modalTitle");
+    const $mCategory = document.getElementById("mCategory");
+    const $mType = document.getElementById("mType");
+    const $mLabel = document.getElementById("mLabel");
+    const $mToken = document.getElementById("mToken");
+    const $mNote = document.getElementById("mNote");
+    const $mWeightSlider = document.getElementById("mWeightSlider");
+    const $mWeightVal = document.getElementById("mWeightVal");
+    const $singleFields = document.getElementById("singleFields");
+    const $blendFields = document.getElementById("blendFields");
+    const $mTokenA = document.getElementById("mTokenA");
+    const $mTokenB = document.getElementById("mTokenB");
+    const $mRatioSlider = document.getElementById("mRatioSlider");
+    const $mRatioA = document.getElementById("mRatioA");
+    const $mRatioB = document.getElementById("mRatioB");
+
+    // preset modal
+    const $presetBackdrop = document.getElementById("presetBackdrop");
+    const $presetName = document.getElementById("presetName");
+    const $presetList = document.getElementById("presetList");
+
+    // history modal
+    const $historyBackdrop = document.getElementById("historyBackdrop");
+    const $historyList = document.getElementById("historyList");
+
+    // category modal
+    const $catBackdrop = document.getElementById("catBackdrop");
+    const $newCatName = document.getElementById("newCatName");
+    const $catList = document.getElementById("catList");
+
+    const $toast = document.getElementById("toast");
+
+    let modalMode = "add";
+    let editingId = null;
+
+    // ---- Helpers
+    const uid = () => "u_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+
+    function toast(msg){
+      $toast.textContent = msg;
+      $toast.classList.add("show");
+      setTimeout(() => $toast.classList.remove("show"), 1400);
     }
+
+    function save(){
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function load(){
+      try{
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if(!raw) return false;
+        const parsed = JSON.parse(raw);
+        if(!parsed || !Array.isArray(parsed.items)) return false;
+        state = { ...state, ...parsed };
+        // ensure categories
+        if(!Array.isArray(state.categories) || state.categories.length === 0){
+          state.categories = [...DEFAULT_CATEGORIES];
+        }
+        if(!state.categories.includes(state.activeCategory)){
+          state.activeCategory = state.categories[0] || "";
+        }
+        // ensure presets/history
+        if(!Array.isArray(state.presets)) state.presets = [];
+        if(!Array.isArray(state.history)) state.history = [];
+        return true;
+      }catch(e){
+        console.warn(e);
+        return false;
+      }
+    }
+
+    function ensureInitial(){
+      const ok = load();
+      if(ok) return;
+      state.categories = [...DEFAULT_CATEGORIES];
+      state.items = structuredClone(DEFAULT_ITEMS);
+      state.selectedIds = [];
+      state.activeCategory = state.categories[0];
+      state.search = "";
+      state.freePos = "";
+      state.freeNeg = "";
+      state.muteFreePos = false;
+      state.muteFreeNeg = false;
+      state.presets = [];
+      state.history = [];
+      save();
+    }
+
+    function normalizeWeight(x){
+      const n = Number(x);
+      if(Number.isNaN(n)) return 1.0;
+      return Math.round(Math.min(2.0, Math.max(0.1, n)) * 100) / 100;
+    }
+
+    function formatToken(item){
+      if(item.mode === "blend"){
+        const r = (item.ratio ?? 50) / 100;
+        const wA = (1 - r).toFixed(2);
+        const wB = r.toFixed(2);
+        return `(${item.tokenA}:${wA}), (${item.tokenB}:${wB})`;
+      }
+      if(item.hasWeight){
+        const w = normalizeWeight(item.weight ?? 1.0).toFixed(2);
+        return `(${item.token}:${w})`;
+      }
+      return item.token;
+    }
+
+    function isSelected(id){ return state.selectedIds.includes(id); }
+
+    function setSelected(id, checked){
+      const exists = isSelected(id);
+      if(checked && !exists) state.selectedIds.push(id);
+      if(!checked && exists) state.selectedIds = state.selectedIds.filter(x => x !== id);
+      save();
+      renderOutputs();
+      renderList();
+    }
+
+    function getItemById(id){ return state.items.find(it => it.id === id); }
+
+    function visibleItemsInCategory(category){
+      const q = (state.search || "").trim().toLowerCase();
+      return state.items
+        .filter(it => it.category === category && !it.hidden)
+        .filter(it => {
+          if(!q) return true;
+          const l = (it.label || "").toLowerCase();
+          const t = (it.token || "").toLowerCase();
+          const tA = (it.tokenA || "").toLowerCase();
+          const tB = (it.tokenB || "").toLowerCase();
+          return l.includes(q) || t.includes(q) || tA.includes(q) || tB.includes(q);
+        });
+    }
+
+    function countSelectedInCategory(category){
+      const ids = new Set(state.selectedIds);
+      return state.items.filter(it => it.category === category && !it.hidden && ids.has(it.id)).length;
+    }
+
+    function buildPrompt(){
+      const ids = new Set(state.selectedIds);
+      const pos = [];
+      const neg = [];
+      for(const cat of state.categories){
+        const inCat = state.items.filter(it => it.category === cat && !it.hidden && ids.has(it.id));
+        for(const it of inCat){
+          const t = formatToken(it).trim();
+          if(!t) continue;
+          if(it.type === "negative") neg.push(t);
+          else pos.push(t);
+        }
+      }
+      if(!state.muteFreePos){
+        const f = (state.freePos || "").trim();
+        if(f) pos.push(f);
+      }
+      if(!state.muteFreeNeg){
+        const f = (state.freeNeg || "").trim();
+        if(f) neg.push(f);
+      }
+      return { pos, neg };
+    }
+
+    function renderOutputs(){
+      const {pos, neg} = buildPrompt();
+      $posOut.value = pos.join(", ");
+      $negOut.value = neg.join(", ");
+      $posStats.textContent = `${pos.length} tokens`;
+      $negStats.textContent = `${neg.length} tokens`;
+      save();
+    }
+
+    function renderTabs(){
+      $tabs.innerHTML = "";
+      for(const cat of state.categories){
+        const el = document.createElement("div");
+        el.className = "tab" + (cat === state.activeCategory ? " active" : "");
+        el.textContent = cat;
+        el.onclick = () => {
+          state.activeCategory = cat;
+          state.search = "";
+          $search.value = "";
+          save();
+          renderTabs();
+          renderList();
+        };
+        $tabs.appendChild(el);
+      }
+    }
+
+    function renderList(){
+      const cat = state.activeCategory;
+      const list = visibleItemsInCategory(cat);
+      const totalAllInCat = state.items.filter(it => it.category === cat && !it.hidden).length;
+      const selectedInCat = countSelectedInCategory(cat);
+      $badgeCount.textContent = `${totalAllInCat} items`;
+      $badgeSelected.textContent = `${selectedInCat} selected`;
+      $itemList.innerHTML = "";
+      if(list.length === 0){
+        const empty = document.createElement("div");
+        empty.style.cssText = "color:var(--muted);font-size:13px;padding:6px 2px";
+        empty.textContent = "（該当する項目がありません。検索条件を変えるか、＋項目追加を使ってください）";
+        $itemList.appendChild(empty);
+        return;
+      }
+      for(const it of list){
+        const row = document.createElement("div");
+        row.className = "item";
+
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = isSelected(it.id);
+        cb.onchange = () => setSelected(it.id, cb.checked);
+
+        const meta = document.createElement("div");
+        meta.className = "meta";
+
+        const label = document.createElement("div");
+        label.className = "label";
+        label.textContent = it.label || it.token || (it.tokenA + "/" + it.tokenB);
+
+        const token = document.createElement("div");
+        token.className = "token";
+        const typeBadge = it.type === "negative" ? "NEG" : "POS";
+        token.textContent = `${typeBadge}: ${formatToken(it)}`;
+
+        meta.appendChild(label);
+        meta.appendChild(token);
+
+        const actions = document.createElement("div");
+        actions.className = "actions";
+
+        const btnEdit = document.createElement("button");
+        btnEdit.className = "small";
+        btnEdit.textContent = "編集";
+        btnEdit.onclick = () => openModalEdit(it.id);
+
+        const btnHide = document.createElement("button");
+        btnHide.className = "small";
+        btnHide.textContent = "非表示";
+        btnHide.onclick = () => {
+          it.hidden = true;
+          state.selectedIds = state.selectedIds.filter(x => x !== it.id);
+          save();
+          renderList();
+          renderOutputs();
+          toast("非表示にしました");
+        };
+
+        const btnDel = document.createElement("button");
+        btnDel.className = "small danger";
+        btnDel.textContent = "削除";
+        btnDel.onclick = () => {
+          if(!confirm("この項目を完全に削除します。よろしいですか？")) return;
+          state.items = state.items.filter(x => x.id !== it.id);
+          state.selectedIds = state.selectedIds.filter(x => x !== it.id);
+          save();
+          renderList();
+          renderOutputs();
+          toast("削除しました");
+        };
+
+        actions.appendChild(btnEdit);
+        actions.appendChild(btnHide);
+        actions.appendChild(btnDel);
+
+        row.appendChild(cb);
+        row.appendChild(meta);
+        row.appendChild(actions);
+        $itemList.appendChild(row);
+      }
+    }
+
+    // ---- Item Modal
+    function fillModalCategories(){
+      $mCategory.innerHTML = "";
+      for(const cat of state.categories){
+        const opt = document.createElement("option");
+        opt.value = cat;
+        opt.textContent = cat;
+        $mCategory.appendChild(opt);
+      }
+    }
+
+    function getMode(){
+      const r = document.querySelector('input[name="mMode"]:checked');
+      return r ? r.value : "single";
+    }
+
+    function setMode(mode){
+      document.querySelectorAll('input[name="mMode"]').forEach(r => r.checked = r.value === mode);
+      $singleFields.style.display = mode === "single" ? "block" : "none";
+      $blendFields.style.display = mode === "blend" ? "block" : "none";
+    }
+
+    function getWeightMode(){
+      const r = document.querySelector('input[name="mWeightMode"]:checked');
+      return r ? r.value : "none";
+    }
+
+    function setWeightMode(mode){
+      document.querySelectorAll('input[name="mWeightMode"]').forEach(r => r.checked = r.value === mode);
+      $mWeightSlider.disabled = mode !== "has";
+    }
+
+    function updateWeightVal(){
+      $mWeightVal.textContent = Number($mWeightSlider.value).toFixed(2);
+    }
+
+    function updateRatioVal(){
+      const r = Number($mRatioSlider.value) / 100;
+      $mRatioA.textContent = (1 - r).toFixed(2);
+      $mRatioB.textContent = r.toFixed(2);
+    }
+
+    function openModalAdd(){
+      modalMode = "add";
+      editingId = null;
+      $modalTitle.textContent = "項目追加";
+      fillModalCategories();
+      $mCategory.value = state.activeCategory;
+      $mType.value = (state.activeCategory === "ネガティブ") ? "negative" : "positive";
+      $mLabel.value = "";
+      $mToken.value = "";
+      $mNote.value = "";
+      setMode("single");
+      setWeightMode("none");
+      $mWeightSlider.value = "1.00";
+      updateWeightVal();
+      $mTokenA.value = "";
+      $mTokenB.value = "";
+      $mRatioSlider.value = "50";
+      updateRatioVal();
+      $modalBackdrop.classList.add("show");
+      $mToken.focus();
+    }
+
+    function openModalEdit(id){
+      const it = getItemById(id);
+      if(!it) return;
+      modalMode = "edit";
+      editingId = id;
+      $modalTitle.textContent = "項目編集";
+      fillModalCategories();
+      $mCategory.value = it.category;
+      $mType.value = it.type;
+      $mLabel.value = it.label || "";
+      $mNote.value = it.note || "";
+
+      const mode = it.mode || "single";
+      setMode(mode);
+
+      if(mode === "single"){
+        $mToken.value = it.token || "";
+        setWeightMode(it.hasWeight ? "has" : "none");
+        $mWeightSlider.value = (it.weight ?? 1.0).toString();
+        updateWeightVal();
+      } else {
+        $mTokenA.value = it.tokenA || "";
+        $mTokenB.value = it.tokenB || "";
+        $mRatioSlider.value = (it.ratio ?? 50).toString();
+        updateRatioVal();
+      }
+
+      $modalBackdrop.classList.add("show");
+    }
+
+    function closeModal(){ $modalBackdrop.classList.remove("show"); }
+
+    function saveModal(){
+      const category = ($mCategory.value || "").trim();
+      const type = ($mType.value || "").trim();
+      const label = ($mLabel.value || "").trim();
+      const note = ($mNote.value || "").trim();
+      const mode = getMode();
+
+      let token = "", tokenA = "", tokenB = "", hasWeight = false, weight = 1.0, ratio = 50;
+
+      if(mode === "single"){
+        token = ($mToken.value || "").trim();
+        if(!token){
+          toast("tokenを入力してください");
+          $mToken.focus();
+          return;
+        }
+        hasWeight = getWeightMode() === "has";
+        weight = hasWeight ? normalizeWeight($mWeightSlider.value) : 1.0;
+      } else {
+        tokenA = ($mTokenA.value || "").trim();
+        tokenB = ($mTokenB.value || "").trim();
+        if(!tokenA || !tokenB){
+          toast("トークンA/Bを入力してください");
+          return;
+        }
+        ratio = Number($mRatioSlider.value);
+      }
+
+      if(modalMode === "add"){
+        const newItem = {
+          id: uid(), category, type, label: label || token || `${tokenA}/${tokenB}`,
+          token, mode, hasWeight, weight, tokenA, tokenB, ratio,
+          hidden: false, isUserCreated: true, note
+        };
+        state.items.push(newItem);
+        save();
+        closeModal();
+        renderList();
+        renderOutputs();
+        toast("追加しました");
+        return;
+      }
+
+      if(modalMode === "edit" && editingId){
+        const it = getItemById(editingId);
+        if(!it) return;
+        it.category = category;
+        it.type = type;
+        it.label = label || token || `${tokenA}/${tokenB}`;
+        it.note = note;
+        it.mode = mode;
+        it.token = token;
+        it.hasWeight = hasWeight;
+        it.weight = weight;
+        it.tokenA = tokenA;
+        it.tokenB = tokenB;
+        it.ratio = ratio;
+        state.activeCategory = category;
+        save();
+        closeModal();
+        renderTabs();
+        renderList();
+        renderOutputs();
+        toast("更新しました");
+      }
+    }
+
+    // ---- Preset Modal
+    function openPresetModal(){
+      $presetName.value = "";
+      renderPresetList();
+      $presetBackdrop.classList.add("show");
+    }
+
+    function closePresetModal(){ $presetBackdrop.classList.remove("show"); }
+
+    function renderPresetList(){
+      $presetList.innerHTML = "";
+      if(state.presets.length === 0){
+        $presetList.innerHTML = '<div style="color:var(--muted);font-size:12px">プリセットがありません</div>';
+        return;
+      }
+      for(const p of state.presets){
+        const row = document.createElement("div");
+        row.className = "preset-row";
+
+        const name = document.createElement("div");
+        name.className = "name";
+        name.textContent = p.name;
+
+        const btnLoad = document.createElement("button");
+        btnLoad.className = "small primary";
+        btnLoad.textContent = "ロード";
+        btnLoad.onclick = () => {
+          state.selectedIds = [...(p.selectedIds || [])];
+          state.freePos = p.freePos || "";
+          state.freeNeg = p.freeNeg || "";
+          state.muteFreePos = !!p.muteFreePos;
+          state.muteFreeNeg = !!p.muteFreeNeg;
+          save();
+          renderAll();
+          closePresetModal();
+          toast("ロードしました");
+        };
+
+        const btnOverwrite = document.createElement("button");
+        btnOverwrite.className = "small";
+        btnOverwrite.textContent = "上書き";
+        btnOverwrite.onclick = () => {
+          p.selectedIds = [...state.selectedIds];
+          p.freePos = state.freePos;
+          p.freeNeg = state.freeNeg;
+          p.muteFreePos = state.muteFreePos;
+          p.muteFreeNeg = state.muteFreeNeg;
+          save();
+          renderPresetList();
+          toast("上書き保存しました");
+        };
+
+        const btnDel = document.createElement("button");
+        btnDel.className = "small danger";
+        btnDel.textContent = "削除";
+        btnDel.onclick = () => {
+          state.presets = state.presets.filter(x => x.id !== p.id);
+          save();
+          renderPresetList();
+          toast("削除しました");
+        };
+
+        row.appendChild(name);
+        row.appendChild(btnLoad);
+        row.appendChild(btnOverwrite);
+        row.appendChild(btnDel);
+        $presetList.appendChild(row);
+      }
+    }
+
+    function savePreset(clearAfter){
+      const name = ($presetName.value || "").trim();
+      if(!name){
+        toast("プリセット名を入力してください");
+        $presetName.focus();
+        return;
+      }
+      const preset = {
+        id: uid(), name,
+        selectedIds: [...state.selectedIds],
+        freePos: state.freePos,
+        freeNeg: state.freeNeg,
+        muteFreePos: state.muteFreePos,
+        muteFreeNeg: state.muteFreeNeg
+      };
+      state.presets.push(preset);
+      save();
+      renderPresetList();
+      $presetName.value = "";
+      toast("保存しました");
+      if(clearAfter){
+        clearSelection();
+        closePresetModal();
+      }
+    }
+
+    // ---- History Modal
+    function openHistoryModal(){
+      renderHistoryList();
+      $historyBackdrop.classList.add("show");
+    }
+
+    function closeHistoryModal(){ $historyBackdrop.classList.remove("show"); }
+
+    function renderHistoryList(){
+      $historyList.innerHTML = "";
+      if(state.history.length === 0){
+        $historyList.innerHTML = '<div style="color:var(--muted);font-size:12px">履歴がありません</div>';
+        return;
+      }
+      for(const h of state.history){
+        const row = document.createElement("div");
+        row.className = "preset-row";
+        row.style.flexDirection = "column";
+        row.style.alignItems = "flex-start";
+        row.style.gap = "6px";
+
+        const date = document.createElement("div");
+        date.style.cssText = "font-size:11px;color:var(--muted)";
+        date.textContent = h.date;
+
+        const pos = document.createElement("div");
+        pos.style.cssText = "font-size:11px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%";
+        pos.textContent = "POS: " + (h.pos || "(empty)");
+
+        const neg = document.createElement("div");
+        neg.style.cssText = "font-size:11px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%";
+        neg.textContent = "NEG: " + (h.neg || "(empty)");
+
+        const btns = document.createElement("div");
+        btns.className = "inline";
+
+        const btnCopy = document.createElement("button");
+        btnCopy.className = "small primary";
+        btnCopy.textContent = "両方コピー";
+        btnCopy.onclick = () => {
+          copyText(`Positive: ${h.pos}\nNegative: ${h.neg}`);
+        };
+
+        const btnDel = document.createElement("button");
+        btnDel.className = "small danger";
+        btnDel.textContent = "削除";
+        btnDel.onclick = () => {
+          state.history = state.history.filter(x => x.id !== h.id);
+          save();
+          renderHistoryList();
+          toast("削除しました");
+        };
+
+        btns.appendChild(btnCopy);
+        btns.appendChild(btnDel);
+
+        row.appendChild(date);
+        row.appendChild(pos);
+        row.appendChild(neg);
+        row.appendChild(btns);
+        $historyList.appendChild(row);
+      }
+    }
+
+    function saveToHistory(){
+      const {pos, neg} = buildPrompt();
+      const posText = pos.join(", ");
+      const negText = neg.join(", ");
+      const entry = {
+        id: uid(),
+        date: new Date().toLocaleString("ja-JP"),
+        pos: posText,
+        neg: negText
+      };
+      state.history.unshift(entry);
+      if(state.history.length > 30) state.history = state.history.slice(0, 30);
+      save();
+      toast("履歴に保存しました");
+    }
+
+    // ---- Category Modal
+    function openCatModal(){
+      tempCategories = [...state.categories];
+      renderCatList();
+      $newCatName.value = "";
+      $catBackdrop.classList.add("show");
+    }
+
+    function closeCatModal(){ $catBackdrop.classList.remove("show"); }
+
+    function renderCatList(){
+      $catList.innerHTML = "";
+      for(let i = 0; i < tempCategories.length; i++){
+        const cat = tempCategories[i];
+        const row = document.createElement("div");
+        row.className = "cat-row";
+
+        const inp = document.createElement("input");
+        inp.className = "cat-inp";
+        inp.value = cat;
+        inp.onchange = () => { tempCategories[i] = inp.value.trim() || cat; };
+
+        const btnUp = document.createElement("button");
+        btnUp.className = "small";
+        btnUp.textContent = "↑";
+        btnUp.disabled = i === 0;
+        btnUp.onclick = () => {
+          [tempCategories[i-1], tempCategories[i]] = [tempCategories[i], tempCategories[i-1]];
+          renderCatList();
+        };
+
+        const btnDown = document.createElement("button");
+        btnDown.className = "small";
+        btnDown.textContent = "↓";
+        btnDown.disabled = i === tempCategories.length - 1;
+        btnDown.onclick = () => {
+          [tempCategories[i], tempCategories[i+1]] = [tempCategories[i+1], tempCategories[i]];
+          renderCatList();
+        };
+
+        const btnDel = document.createElement("button");
+        btnDel.className = "small danger";
+        btnDel.textContent = "削除";
+        btnDel.onclick = () => {
+          if(!confirm(`カテゴリ「${cat}」を削除しますか？\n（このカテゴリの項目は残りますが、タブに表示されなくなります）`)) return;
+          tempCategories.splice(i, 1);
+          renderCatList();
+        };
+
+        row.appendChild(inp);
+        row.appendChild(btnUp);
+        row.appendChild(btnDown);
+        row.appendChild(btnDel);
+        $catList.appendChild(row);
+      }
+    }
+
+    function addCategory(){
+      const name = ($newCatName.value || "").trim();
+      if(!name){
+        toast("カテゴリ名を入力してください");
+        return;
+      }
+      if(tempCategories.includes(name)){
+        toast("同じ名前のカテゴリがあります");
+        return;
+      }
+      tempCategories.push(name);
+      renderCatList();
+      $newCatName.value = "";
+    }
+
+    function saveCatModal(){
+      // update items category names if renamed
+      const oldCats = state.categories;
+      const newCats = tempCategories.filter(c => c);
+      // apply rename: if old[i] != new[i], update items
+      for(let i = 0; i < Math.min(oldCats.length, newCats.length); i++){
+        if(oldCats[i] !== newCats[i]){
+          state.items.forEach(it => {
+            if(it.category === oldCats[i]) it.category = newCats[i];
+          });
+        }
+      }
+      state.categories = newCats;
+      if(!state.categories.includes(state.activeCategory)){
+        state.activeCategory = state.categories[0] || "";
+      }
+      save();
+      renderTabs();
+      renderList();
+      closeCatModal();
+      toast("カテゴリを保存しました");
+    }
+
+    // ---- Copy
+    async function copyText(text){
+      if(!text){
+        toast("コピーする内容がありません");
+        return;
+      }
+      try{
+        await navigator.clipboard.writeText(text);
+        toast("コピーしました");
+      }catch(e){
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        try{ document.execCommand("copy"); toast("コピーしました"); }
+        catch(_){ toast("コピーに失敗しました"); }
+        document.body.removeChild(ta);
+      }
+    }
+
+    // ---- Export / Import
+    function exportConfig(){
+      copyText(JSON.stringify(state, null, 2));
+      toast("設定JSONをコピーしました");
+    }
+
+    function importConfig(){
+      const raw = prompt("貼り付ける設定JSONを入力してください（現在の設定は上書きされます）");
+      if(!raw) return;
+      try{
+        const parsed = JSON.parse(raw);
+        if(!parsed || !Array.isArray(parsed.items)){
+          toast("形式が不正です");
+          return;
+        }
+        state = { ...state, ...parsed };
+        if(!Array.isArray(state.categories) || state.categories.length === 0){
+          state.categories = [...DEFAULT_CATEGORIES];
+        }
+        if(!state.categories.includes(state.activeCategory)){
+          state.activeCategory = state.categories[0];
+        }
+        state.search = "";
+        save();
+        renderAll();
+        toast("インポートしました");
+      }catch(e){
+        console.warn(e);
+        toast("JSONの解析に失敗しました");
+      }
+    }
+
+    function clearSelection(){
+      state.selectedIds = [];
+      state.freePos = "";
+      state.freeNeg = "";
+      state.muteFreePos = false;
+      state.muteFreeNeg = false;
+      save();
+      renderAll();
+      toast("選択をクリアしました");
+    }
+
+    function resetAll(){
+      if(!confirm("初期化します。追加した項目・選択状態・自由入力も全部消えます。よろしいですか？")) return;
+      localStorage.removeItem(STORAGE_KEY);
+      ensureInitial();
+      renderAll();
+      toast("初期化しました");
+    }
+
+    // ---- Events
+    $search.addEventListener("input", () => {
+      state.search = $search.value;
+      save();
+      renderList();
+    });
+
+    document.getElementById("btnAddItem").addEventListener("click", openModalAdd);
+    document.getElementById("btnCloseModal").addEventListener("click", closeModal);
+    document.getElementById("btnModalCancel").addEventListener("click", closeModal);
+    $modalBackdrop.addEventListener("click", (e) => { if(e.target === $modalBackdrop) closeModal(); });
+    document.getElementById("btnModalSave").addEventListener("click", saveModal);
+
+    document.querySelectorAll('input[name="mMode"]').forEach(r => {
+      r.addEventListener("change", () => setMode(getMode()));
+    });
+    document.querySelectorAll('input[name="mWeightMode"]').forEach(r => {
+      r.addEventListener("change", () => setWeightMode(getWeightMode()));
+    });
+    $mWeightSlider.addEventListener("input", updateWeightVal);
+    $mRatioSlider.addEventListener("input", updateRatioVal);
+
+    document.getElementById("btnCopyPos").addEventListener("click", () => copyText($posOut.value));
+    document.getElementById("btnCopyNeg").addEventListener("click", () => copyText($negOut.value));
+    document.getElementById("btnCopyBoth").addEventListener("click", () => {
+      copyText(`Positive: ${$posOut.value}\nNegative: ${$negOut.value}`);
+    });
+
+    $freePos.addEventListener("input", () => { state.freePos = $freePos.value; renderOutputs(); });
+    $freeNeg.addEventListener("input", () => { state.freeNeg = $freeNeg.value; renderOutputs(); });
+    $muteFreePos.addEventListener("change", () => { state.muteFreePos = $muteFreePos.checked; renderOutputs(); });
+    $muteFreeNeg.addEventListener("change", () => { state.muteFreeNeg = $muteFreeNeg.checked; renderOutputs(); });
+
+    document.getElementById("btnClearSelection").addEventListener("click", clearSelection);
+    document.getElementById("btnReset").addEventListener("click", resetAll);
+    document.getElementById("btnExport").addEventListener("click", exportConfig);
+    document.getElementById("btnImport").addEventListener("click", importConfig);
+
+    // Preset
+    document.getElementById("btnShowPresets").addEventListener("click", openPresetModal);
+    document.getElementById("btnClosePreset").addEventListener("click", closePresetModal);
+    document.getElementById("btnClosePreset2").addEventListener("click", closePresetModal);
+    $presetBackdrop.addEventListener("click", (e) => { if(e.target === $presetBackdrop) closePresetModal(); });
+    document.getElementById("btnSavePreset").addEventListener("click", () => savePreset(false));
+    document.getElementById("btnSavePresetClear").addEventListener("click", () => savePreset(true));
+
+    // History
+    document.getElementById("btnSaveHistory").addEventListener("click", saveToHistory);
+    document.getElementById("btnShowHistory").addEventListener("click", openHistoryModal);
+    document.getElementById("btnCloseHistory").addEventListener("click", closeHistoryModal);
+    document.getElementById("btnCloseHistory2").addEventListener("click", closeHistoryModal);
+    $historyBackdrop.addEventListener("click", (e) => { if(e.target === $historyBackdrop) closeHistoryModal(); });
+
+    // Category
+    document.getElementById("btnManageCategories").addEventListener("click", openCatModal);
+    document.getElementById("btnCloseCat").addEventListener("click", closeCatModal);
+    document.getElementById("btnCloseCat2").addEventListener("click", closeCatModal);
+    $catBackdrop.addEventListener("click", (e) => { if(e.target === $catBackdrop) closeCatModal(); });
+    document.getElementById("btnAddCat").addEventListener("click", addCategory);
+    document.getElementById("btnSaveCat").addEventListener("click", saveCatModal);
+
+    // ---- Render all
+    function renderAll(){
+      renderTabs();
+      renderList();
+      $search.value = state.search || "";
+      $freePos.value = state.freePos || "";
+      $freeNeg.value = state.freeNeg || "";
+      $muteFreePos.checked = !!state.muteFreePos;
+      $muteFreeNeg.checked = !!state.muteFreeNeg;
+      renderOutputs();
+    }
+
+    // ---- Init
+    ensureInitial();
+    renderAll();
   </script>
 </body>
 </html>
