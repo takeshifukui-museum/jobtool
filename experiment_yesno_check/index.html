@@ -83,7 +83,7 @@
       background: rgba(0,0,0,.12);
       display:grid; grid-template-columns: 26px 1fr auto; gap:10px; align-items:center;
     }
-    .item.hidden{opacity:.45}
+    .item.is-hidden{opacity:.45; border-style:dashed}
     .item .meta{
       display:flex; flex-direction:column; gap:3px;
       min-width:0;
@@ -273,6 +273,8 @@
       outline:none;
       font-size:13px;
     }
+    /* hidden file input */
+    .hidden-input{display:none}
   </style>
 </head>
 <body>
@@ -285,6 +287,7 @@
       <div class="top-actions">
         <button class="ghost" id="btnExport">設定エクスポート</button>
         <button class="ghost" id="btnImport">設定インポート</button>
+        <input type="file" id="importFile" class="hidden-input" accept=".json,application/json" />
         <button class="ghost" id="btnClearSelection">選択クリア</button>
         <button class="danger" id="btnReset">初期化（全削除）</button>
       </div>
@@ -307,6 +310,11 @@
             <input id="search" class="search" placeholder="このカテゴリ内を検索（label / token）" />
             <span class="badge" id="badgeCount">0 items</span>
             <span class="badge" id="badgeSelected">0 selected</span>
+          </div>
+
+          <div class="inline" style="margin-top:10px">
+            <input type="checkbox" id="showHidden" />
+            <label for="showHidden" style="margin:0; color:var(--muted); font-size:12px">非表示アイテムも表示</label>
           </div>
 
           <div class="list" id="itemList"></div>
@@ -536,28 +544,13 @@
   <div class="toast" id="toast"></div>
 
   <script>
-    /**********************
-     *  Stable Diffusion Prompt Builder v2
-     *  - Single HTML file
-     *  - Tabs / checkbox
-     *  - Add/Edit/Hide/Delete items
-     *  - Weight slider
-     *  - Blend mode (tokenA/tokenB with ratio)
-     *  - Presets (named)
-     *  - History (max 30)
-     *  - Category manager
-     *  - localStorage persistence
-     **********************/
-
     const STORAGE_KEY = "sd_prompt_builder_v2";
 
-    // ---- Default Category order (output priority)
     const DEFAULT_CATEGORIES = [
       "人物", "年齢", "人種・肌", "顔・表情", "髪", "服装", "ポーズ",
       "構図・アングル", "背景", "光・色", "スタイル", "品質", "ネガティブ"
     ];
 
-    // ---- Default items
     const DEFAULT_ITEMS = [
       { id:"p1", category:"人物", type:"positive", label:"1girl", token:"1girl", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
       { id:"p2", category:"人物", type:"positive", label:"1boy", token:"1boy", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
@@ -599,7 +592,6 @@
       { id:"n5", category:"ネガティブ", type:"negative", label:"extra fingers", token:"extra fingers", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
     ];
 
-    // ---- State
     let state = {
       categories: [],
       items: [],
@@ -611,13 +603,12 @@
       muteFreePos: false,
       muteFreeNeg: false,
       presets: [],
-      history: []
+      history: [],
+      showHidden: false
     };
 
-    // temp state for category manager
     let tempCategories = [];
 
-    // ---- DOM refs
     const $tabs = document.getElementById("tabs");
     const $itemList = document.getElementById("itemList");
     const $search = document.getElementById("search");
@@ -631,8 +622,9 @@
     const $freeNeg = document.getElementById("freeNeg");
     const $muteFreePos = document.getElementById("muteFreePos");
     const $muteFreeNeg = document.getElementById("muteFreeNeg");
+    const $showHidden = document.getElementById("showHidden");
+    const $importFile = document.getElementById("importFile");
 
-    // item modal
     const $modalBackdrop = document.getElementById("modalBackdrop");
     const $modalTitle = document.getElementById("modalTitle");
     const $mCategory = document.getElementById("mCategory");
@@ -650,16 +642,13 @@
     const $mRatioA = document.getElementById("mRatioA");
     const $mRatioB = document.getElementById("mRatioB");
 
-    // preset modal
     const $presetBackdrop = document.getElementById("presetBackdrop");
     const $presetName = document.getElementById("presetName");
     const $presetList = document.getElementById("presetList");
 
-    // history modal
     const $historyBackdrop = document.getElementById("historyBackdrop");
     const $historyList = document.getElementById("historyList");
 
-    // category modal
     const $catBackdrop = document.getElementById("catBackdrop");
     const $newCatName = document.getElementById("newCatName");
     const $catList = document.getElementById("catList");
@@ -669,7 +658,6 @@
     let modalMode = "add";
     let editingId = null;
 
-    // ---- Helpers
     const uid = () => "u_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
 
     function toast(msg){
@@ -689,16 +677,15 @@
         const parsed = JSON.parse(raw);
         if(!parsed || !Array.isArray(parsed.items)) return false;
         state = { ...state, ...parsed };
-        // ensure categories
         if(!Array.isArray(state.categories) || state.categories.length === 0){
           state.categories = [...DEFAULT_CATEGORIES];
         }
         if(!state.categories.includes(state.activeCategory)){
           state.activeCategory = state.categories[0] || "";
         }
-        // ensure presets/history
         if(!Array.isArray(state.presets)) state.presets = [];
         if(!Array.isArray(state.history)) state.history = [];
+        if(typeof state.showHidden !== "boolean") state.showHidden = false;
         return true;
       }catch(e){
         console.warn(e);
@@ -720,6 +707,7 @@
       state.muteFreeNeg = false;
       state.presets = [];
       state.history = [];
+      state.showHidden = false;
       save();
     }
 
@@ -759,7 +747,8 @@
     function visibleItemsInCategory(category){
       const q = (state.search || "").trim().toLowerCase();
       return state.items
-        .filter(it => it.category === category && !it.hidden)
+        .filter(it => it.category === category)
+        .filter(it => state.showHidden || !it.hidden)
         .filter(it => {
           if(!q) return true;
           const l = (it.label || "").toLowerCase();
@@ -829,7 +818,7 @@
     function renderList(){
       const cat = state.activeCategory;
       const list = visibleItemsInCategory(cat);
-      const totalAllInCat = state.items.filter(it => it.category === cat && !it.hidden).length;
+      const totalAllInCat = state.items.filter(it => it.category === cat && (state.showHidden || !it.hidden)).length;
       const selectedInCat = countSelectedInCategory(cat);
       $badgeCount.textContent = `${totalAllInCat} items`;
       $badgeSelected.textContent = `${selectedInCat} selected`;
@@ -843,11 +832,12 @@
       }
       for(const it of list){
         const row = document.createElement("div");
-        row.className = "item";
+        row.className = "item" + (it.hidden ? " is-hidden" : "");
 
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.checked = isSelected(it.id);
+        cb.disabled = it.hidden;
         cb.onchange = () => setSelected(it.id, cb.checked);
 
         const meta = document.createElement("div");
@@ -855,7 +845,7 @@
 
         const label = document.createElement("div");
         label.className = "label";
-        label.textContent = it.label || it.token || (it.tokenA + "/" + it.tokenB);
+        label.textContent = (it.hidden ? "[非表示] " : "") + (it.label || it.token || (it.tokenA + "/" + it.tokenB));
 
         const token = document.createElement("div");
         token.className = "token";
@@ -868,39 +858,67 @@
         const actions = document.createElement("div");
         actions.className = "actions";
 
-        const btnEdit = document.createElement("button");
-        btnEdit.className = "small";
-        btnEdit.textContent = "編集";
-        btnEdit.onclick = () => openModalEdit(it.id);
+        if(it.hidden){
+          const btnShow = document.createElement("button");
+          btnShow.className = "small primary";
+          btnShow.textContent = "表示に戻す";
+          btnShow.onclick = () => {
+            it.hidden = false;
+            save();
+            renderList();
+            renderOutputs();
+            toast("表示に戻しました");
+          };
+          actions.appendChild(btnShow);
 
-        const btnHide = document.createElement("button");
-        btnHide.className = "small";
-        btnHide.textContent = "非表示";
-        btnHide.onclick = () => {
-          it.hidden = true;
-          state.selectedIds = state.selectedIds.filter(x => x !== it.id);
-          save();
-          renderList();
-          renderOutputs();
-          toast("非表示にしました");
-        };
+          const btnDel = document.createElement("button");
+          btnDel.className = "small danger";
+          btnDel.textContent = "完全削除";
+          btnDel.onclick = () => {
+            if(!confirm("この項目を完全に削除します。よろしいですか？")) return;
+            state.items = state.items.filter(x => x.id !== it.id);
+            state.selectedIds = state.selectedIds.filter(x => x !== it.id);
+            save();
+            renderList();
+            renderOutputs();
+            toast("削除しました");
+          };
+          actions.appendChild(btnDel);
+        } else {
+          const btnEdit = document.createElement("button");
+          btnEdit.className = "small";
+          btnEdit.textContent = "編集";
+          btnEdit.onclick = () => openModalEdit(it.id);
 
-        const btnDel = document.createElement("button");
-        btnDel.className = "small danger";
-        btnDel.textContent = "削除";
-        btnDel.onclick = () => {
-          if(!confirm("この項目を完全に削除します。よろしいですか？")) return;
-          state.items = state.items.filter(x => x.id !== it.id);
-          state.selectedIds = state.selectedIds.filter(x => x !== it.id);
-          save();
-          renderList();
-          renderOutputs();
-          toast("削除しました");
-        };
+          const btnHide = document.createElement("button");
+          btnHide.className = "small";
+          btnHide.textContent = "非表示";
+          btnHide.onclick = () => {
+            it.hidden = true;
+            state.selectedIds = state.selectedIds.filter(x => x !== it.id);
+            save();
+            renderList();
+            renderOutputs();
+            toast("非表示にしました");
+          };
 
-        actions.appendChild(btnEdit);
-        actions.appendChild(btnHide);
-        actions.appendChild(btnDel);
+          const btnDel = document.createElement("button");
+          btnDel.className = "small danger";
+          btnDel.textContent = "削除";
+          btnDel.onclick = () => {
+            if(!confirm("この項目を完全に削除します。よろしいですか？")) return;
+            state.items = state.items.filter(x => x.id !== it.id);
+            state.selectedIds = state.selectedIds.filter(x => x !== it.id);
+            save();
+            renderList();
+            renderOutputs();
+            toast("削除しました");
+          };
+
+          actions.appendChild(btnEdit);
+          actions.appendChild(btnHide);
+          actions.appendChild(btnDel);
+        }
 
         row.appendChild(cb);
         row.appendChild(meta);
@@ -909,7 +927,6 @@
       }
     }
 
-    // ---- Item Modal
     function fillModalCategories(){
       $mCategory.innerHTML = "";
       for(const cat of state.categories){
@@ -1072,7 +1089,6 @@
       }
     }
 
-    // ---- Preset Modal
     function openPresetModal(){
       $presetName.value = "";
       renderPresetList();
@@ -1168,7 +1184,6 @@
       }
     }
 
-    // ---- History Modal
     function openHistoryModal(){
       renderHistoryList();
       $historyBackdrop.classList.add("show");
@@ -1248,7 +1263,6 @@
       toast("履歴に保存しました");
     }
 
-    // ---- Category Modal
     function openCatModal(){
       tempCategories = [...state.categories];
       renderCatList();
@@ -1321,10 +1335,8 @@
     }
 
     function saveCatModal(){
-      // update items category names if renamed
       const oldCats = state.categories;
       const newCats = tempCategories.filter(c => c);
-      // apply rename: if old[i] != new[i], update items
       for(let i = 0; i < Math.min(oldCats.length, newCats.length); i++){
         if(oldCats[i] !== newCats[i]){
           state.items.forEach(it => {
@@ -1343,7 +1355,6 @@
       toast("カテゴリを保存しました");
     }
 
-    // ---- Copy
     async function copyText(text){
       if(!text){
         toast("コピーする内容がありません");
@@ -1363,36 +1374,82 @@
       }
     }
 
-    // ---- Export / Import
     function exportConfig(){
-      copyText(JSON.stringify(state, null, 2));
-      toast("設定JSONをコピーしました");
+      const json = JSON.stringify(state, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "sd-prompt-tool-settings.json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast("設定をエクスポートしました");
     }
 
     function importConfig(){
-      const raw = prompt("貼り付ける設定JSONを入力してください（現在の設定は上書きされます）");
-      if(!raw) return;
-      try{
-        const parsed = JSON.parse(raw);
-        if(!parsed || !Array.isArray(parsed.items)){
-          toast("形式が不正です");
-          return;
-        }
-        state = { ...state, ...parsed };
-        if(!Array.isArray(state.categories) || state.categories.length === 0){
-          state.categories = [...DEFAULT_CATEGORIES];
-        }
-        if(!state.categories.includes(state.activeCategory)){
-          state.activeCategory = state.categories[0];
-        }
-        state.search = "";
-        save();
-        renderAll();
-        toast("インポートしました");
-      }catch(e){
-        console.warn(e);
-        toast("JSONの解析に失敗しました");
+      $importFile.click();
+    }
+
+    function handleImportFile(e){
+      const file = e.target.files[0];
+      if(!file){
+        return;
       }
+      const reader = new FileReader();
+      reader.onload = function(ev){
+        try{
+          const raw = ev.target.result;
+          const parsed = JSON.parse(raw);
+          if(!parsed || typeof parsed !== "object"){
+            toast("形式が不正です（JSONオブジェクトが必要）");
+            return;
+          }
+          if(!Array.isArray(parsed.items)){
+            toast("形式が不正です（items配列がありません）");
+            return;
+          }
+          // Merge with defaults for missing keys
+          const newState = {
+            categories: Array.isArray(parsed.categories) && parsed.categories.length > 0
+              ? parsed.categories
+              : [...DEFAULT_CATEGORIES],
+            items: parsed.items,
+            selectedIds: Array.isArray(parsed.selectedIds) ? parsed.selectedIds : [],
+            activeCategory: parsed.activeCategory || "",
+            search: "",
+            freePos: typeof parsed.freePos === "string" ? parsed.freePos : "",
+            freeNeg: typeof parsed.freeNeg === "string" ? parsed.freeNeg : "",
+            muteFreePos: !!parsed.muteFreePos,
+            muteFreeNeg: !!parsed.muteFreeNeg,
+            presets: Array.isArray(parsed.presets) ? parsed.presets : [],
+            history: Array.isArray(parsed.history) ? parsed.history : [],
+            showHidden: typeof parsed.showHidden === "boolean" ? parsed.showHidden : false
+          };
+          // Validate activeCategory
+          if(!newState.categories.includes(newState.activeCategory)){
+            newState.activeCategory = newState.categories[0] || "";
+          }
+          // Filter selectedIds to only include existing item ids
+          const itemIds = new Set(newState.items.map(it => it.id));
+          newState.selectedIds = newState.selectedIds.filter(id => itemIds.has(id));
+
+          state = newState;
+          save();
+          renderAll();
+          toast("インポートしました");
+        }catch(err){
+          console.warn(err);
+          toast("JSONの解析に失敗しました");
+        }
+      };
+      reader.onerror = function(){
+        toast("ファイルの読み込みに失敗しました");
+      };
+      reader.readAsText(file);
+      // Reset file input so same file can be selected again
+      $importFile.value = "";
     }
 
     function clearSelection(){
@@ -1414,12 +1471,19 @@
       toast("初期化しました");
     }
 
-    // ---- Events
     $search.addEventListener("input", () => {
       state.search = $search.value;
       save();
       renderList();
     });
+
+    $showHidden.addEventListener("change", () => {
+      state.showHidden = $showHidden.checked;
+      save();
+      renderList();
+    });
+
+    $importFile.addEventListener("change", handleImportFile);
 
     document.getElementById("btnAddItem").addEventListener("click", openModalAdd);
     document.getElementById("btnCloseModal").addEventListener("click", closeModal);
@@ -1452,7 +1516,6 @@
     document.getElementById("btnExport").addEventListener("click", exportConfig);
     document.getElementById("btnImport").addEventListener("click", importConfig);
 
-    // Preset
     document.getElementById("btnShowPresets").addEventListener("click", openPresetModal);
     document.getElementById("btnClosePreset").addEventListener("click", closePresetModal);
     document.getElementById("btnClosePreset2").addEventListener("click", closePresetModal);
@@ -1460,14 +1523,12 @@
     document.getElementById("btnSavePreset").addEventListener("click", () => savePreset(false));
     document.getElementById("btnSavePresetClear").addEventListener("click", () => savePreset(true));
 
-    // History
     document.getElementById("btnSaveHistory").addEventListener("click", saveToHistory);
     document.getElementById("btnShowHistory").addEventListener("click", openHistoryModal);
     document.getElementById("btnCloseHistory").addEventListener("click", closeHistoryModal);
     document.getElementById("btnCloseHistory2").addEventListener("click", closeHistoryModal);
     $historyBackdrop.addEventListener("click", (e) => { if(e.target === $historyBackdrop) closeHistoryModal(); });
 
-    // Category
     document.getElementById("btnManageCategories").addEventListener("click", openCatModal);
     document.getElementById("btnCloseCat").addEventListener("click", closeCatModal);
     document.getElementById("btnCloseCat2").addEventListener("click", closeCatModal);
@@ -1475,7 +1536,6 @@
     document.getElementById("btnAddCat").addEventListener("click", addCategory);
     document.getElementById("btnSaveCat").addEventListener("click", saveCatModal);
 
-    // ---- Render all
     function renderAll(){
       renderTabs();
       renderList();
@@ -1484,10 +1544,10 @@
       $freeNeg.value = state.freeNeg || "";
       $muteFreePos.checked = !!state.muteFreePos;
       $muteFreeNeg.checked = !!state.muteFreeNeg;
+      $showHidden.checked = !!state.showHidden;
       renderOutputs();
     }
 
-    // ---- Init
     ensureInitial();
     renderAll();
   </script>
