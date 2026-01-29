@@ -10,11 +10,18 @@
   <div id="result"></div>
 
   <script>
-    const keywords = ['給与', '勤務地', '仕事内容'];
+    const items = [
+      { name: '年収に関する記載', keywords: ['年収', '給与', '月給', '賞与'] },
+      { name: '業務内容に関する記載', keywords: ['業務内容', '仕事内容', '職務内容', '担当業務'] },
+      { name: '必須スキル/歓迎スキルに関する記載', keywords: ['必須スキル', '歓迎スキル', '必須条件', '歓迎条件', '応募資格'] }
+    ];
 
     function check() {
       const text = document.getElementById('input').value;
-      const result = keywords.map(k => k + ': ' + (text.includes(k) ? 'Yes' : 'No')).join('<br>');
+      const result = items.map(item => {
+        const found = item.keywords.some(k => text.includes(k));
+        return item.name + '：' + (found ? 'Yes' : 'No');
+      }).join('<br>');
       document.getElementById('result').innerHTML = result;
     }
   </script>
