@@ -69,6 +69,7 @@
       background: rgba(0,0,0,.15);
     }
     .tab.active{border-color: rgba(56,189,248,.6); color:var(--text); box-shadow: 0 0 0 2px rgba(56,189,248,.08) inset}
+    .tab.fixed{border-color: rgba(251,113,133,.35)}
     .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
     .search{
       width:100%;
@@ -262,6 +263,7 @@
       border-radius:10px;
       background: rgba(0,0,0,.12);
     }
+    .cat-row.is-fixed{border-color: rgba(251,113,133,.35); background: rgba(251,113,133,.05)}
     .cat-row .cat-name{flex:1; font-size:13px}
     .cat-row .cat-inp{
       flex:1;
@@ -275,6 +277,9 @@
     }
     /* hidden file input */
     .hidden-input{display:none}
+    /* order buttons */
+    .order-btns{display:flex; flex-direction:column; gap:2px}
+    .order-btns button{padding:2px 6px; font-size:10px; min-width:22px}
   </style>
 </head>
 <body>
@@ -532,7 +537,7 @@
           <button class="primary small" id="btnAddCat">追加</button>
         </div>
         <div class="cat-list" id="catList"></div>
-        <div class="hint">カテゴリの順序はプロンプト出力順に影響します。</div>
+        <div class="hint">カテゴリの順序はプロンプト出力順に影響します。「ネガティブ」は固定枠のため並び替え不可。</div>
       </div>
       <div class="modal-f">
         <button class="ghost" id="btnCloseCat2">キャンセル</button>
@@ -545,6 +550,7 @@
 
   <script>
     const STORAGE_KEY = "sd_prompt_builder_v2";
+    const FIXED_CATEGORY = "ネガティブ";
 
     const DEFAULT_CATEGORIES = [
       "人物", "年齢", "人種・肌", "顔・表情", "髪", "服装", "ポーズ",
@@ -552,44 +558,44 @@
     ];
 
     const DEFAULT_ITEMS = [
-      { id:"p1", category:"人物", type:"positive", label:"1girl", token:"1girl", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"p2", category:"人物", type:"positive", label:"1boy", token:"1boy", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"p3", category:"人物", type:"positive", label:"2girls", token:"2girls", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"a1", category:"年齢", type:"positive", label:"teen", token:"teen", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"a2", category:"年齢", type:"positive", label:"adult", token:"adult", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"s1", category:"人種・肌", type:"positive", label:"light skin", token:"light skin", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"s2", category:"人種・肌", type:"positive", label:"tan", token:"tan", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"s3", category:"人種・肌", type:"positive", label:"dark skin", token:"dark skin", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"f1", category:"顔・表情", type:"positive", label:"smile", token:"smile", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"f2", category:"顔・表情", type:"positive", label:"serious", token:"serious", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"f3", category:"顔・表情", type:"positive", label:"looking at viewer", token:"looking at viewer", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"h1", category:"髪", type:"positive", label:"long hair", token:"long hair", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"h2", category:"髪", type:"positive", label:"short hair", token:"short hair", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"h3", category:"髪", type:"positive", label:"blue hair（※weight向き）", token:"blue hair", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"色・光系はweight運用しやすい" },
-      { id:"c1", category:"服装", type:"positive", label:"school uniform", token:"school uniform", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"c2", category:"服装", type:"positive", label:"suit", token:"suit", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"po1", category:"ポーズ", type:"positive", label:"standing", token:"standing", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"po2", category:"ポーズ", type:"positive", label:"sitting", token:"sitting", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"ca1", category:"構図・アングル", type:"positive", label:"upper body", token:"upper body", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"ca2", category:"構図・アングル", type:"positive", label:"close-up", token:"close-up", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"ca3", category:"構図・アングル", type:"positive", label:"wide shot", token:"wide shot", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"b1", category:"背景", type:"positive", label:"studio background", token:"studio background", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"b2", category:"背景", type:"positive", label:"city street", token:"city street", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"b3", category:"背景", type:"positive", label:"forest", token:"forest", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"l1", category:"光・色", type:"positive", label:"soft lighting（※weight向き）", token:"soft lighting", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"l2", category:"光・色", type:"positive", label:"rim light（※weight向き）", token:"rim light", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"l3", category:"光・色", type:"positive", label:"vibrant colors（※weight向き）", token:"vibrant colors", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"st1", category:"スタイル", type:"positive", label:"anime style", token:"anime style", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"st2", category:"スタイル", type:"positive", label:"illustration", token:"illustration", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"st3", category:"スタイル", type:"positive", label:"photorealistic", token:"photorealistic", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"q1", category:"品質", type:"positive", label:"masterpiece", token:"masterpiece", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"q2", category:"品質", type:"positive", label:"best quality", token:"best quality", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"q3", category:"品質", type:"positive", label:"highly detailed", token:"highly detailed", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"n1", category:"ネガティブ", type:"negative", label:"worst quality", token:"worst quality", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"n2", category:"ネガティブ", type:"negative", label:"low quality", token:"low quality", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"n3", category:"ネガティブ", type:"negative", label:"blurry", token:"blurry", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"n4", category:"ネガティブ", type:"negative", label:"bad anatomy", token:"bad anatomy", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
-      { id:"n5", category:"ネガティブ", type:"negative", label:"extra fingers", token:"extra fingers", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"" },
+      { id:"p1", category:"人物", type:"positive", label:"1girl", token:"1girl", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"p2", category:"人物", type:"positive", label:"1boy", token:"1boy", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"p3", category:"人物", type:"positive", label:"2girls", token:"2girls", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:2 },
+      { id:"a1", category:"年齢", type:"positive", label:"teen", token:"teen", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"a2", category:"年齢", type:"positive", label:"adult", token:"adult", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"s1", category:"人種・肌", type:"positive", label:"light skin", token:"light skin", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"s2", category:"人種・肌", type:"positive", label:"tan", token:"tan", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"s3", category:"人種・肌", type:"positive", label:"dark skin", token:"dark skin", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:2 },
+      { id:"f1", category:"顔・表情", type:"positive", label:"smile", token:"smile", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"f2", category:"顔・表情", type:"positive", label:"serious", token:"serious", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"f3", category:"顔・表情", type:"positive", label:"looking at viewer", token:"looking at viewer", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:2 },
+      { id:"h1", category:"髪", type:"positive", label:"long hair", token:"long hair", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"h2", category:"髪", type:"positive", label:"short hair", token:"short hair", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"h3", category:"髪", type:"positive", label:"blue hair（※weight向き）", token:"blue hair", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"色・光系はweight運用しやすい", order:2 },
+      { id:"c1", category:"服装", type:"positive", label:"school uniform", token:"school uniform", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"c2", category:"服装", type:"positive", label:"suit", token:"suit", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"po1", category:"ポーズ", type:"positive", label:"standing", token:"standing", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"po2", category:"ポーズ", type:"positive", label:"sitting", token:"sitting", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"ca1", category:"構図・アングル", type:"positive", label:"upper body", token:"upper body", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"ca2", category:"構図・アングル", type:"positive", label:"close-up", token:"close-up", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"ca3", category:"構図・アングル", type:"positive", label:"wide shot", token:"wide shot", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:2 },
+      { id:"b1", category:"背景", type:"positive", label:"studio background", token:"studio background", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"b2", category:"背景", type:"positive", label:"city street", token:"city street", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"b3", category:"背景", type:"positive", label:"forest", token:"forest", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:2 },
+      { id:"l1", category:"光・色", type:"positive", label:"soft lighting（※weight向き）", token:"soft lighting", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"l2", category:"光・色", type:"positive", label:"rim light（※weight向き）", token:"rim light", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"l3", category:"光・色", type:"positive", label:"vibrant colors（※weight向き）", token:"vibrant colors", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:2 },
+      { id:"st1", category:"スタイル", type:"positive", label:"anime style", token:"anime style", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"st2", category:"スタイル", type:"positive", label:"illustration", token:"illustration", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"st3", category:"スタイル", type:"positive", label:"photorealistic", token:"photorealistic", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:2 },
+      { id:"q1", category:"品質", type:"positive", label:"masterpiece", token:"masterpiece", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"q2", category:"品質", type:"positive", label:"best quality", token:"best quality", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"q3", category:"品質", type:"positive", label:"highly detailed", token:"highly detailed", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:2 },
+      { id:"n1", category:"ネガティブ", type:"negative", label:"worst quality", token:"worst quality", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:0 },
+      { id:"n2", category:"ネガティブ", type:"negative", label:"low quality", token:"low quality", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:1 },
+      { id:"n3", category:"ネガティブ", type:"negative", label:"blurry", token:"blurry", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:2 },
+      { id:"n4", category:"ネガティブ", type:"negative", label:"bad anatomy", token:"bad anatomy", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:3 },
+      { id:"n5", category:"ネガティブ", type:"negative", label:"extra fingers", token:"extra fingers", mode:"single", hasWeight:false, weight:1.0, tokenA:"", tokenB:"", ratio:50, hidden:false, isUserCreated:false, note:"", order:4 },
     ];
 
     let state = {
@@ -607,6 +613,7 @@
       showHidden: false
     };
 
+    // tempCategories: [{original, current}] for tracking renames vs reorders
     let tempCategories = [];
 
     const $tabs = document.getElementById("tabs");
@@ -693,9 +700,25 @@
       }
     }
 
+    // Migrate old data: ensure all items have order field
+    function migrateItemOrder(){
+      const catOrders = {};
+      for(const it of state.items){
+        if(typeof it.order !== "number"){
+          const cat = it.category || "";
+          if(!(cat in catOrders)) catOrders[cat] = 0;
+          it.order = catOrders[cat]++;
+        }
+      }
+    }
+
     function ensureInitial(){
       const ok = load();
-      if(ok) return;
+      if(ok){
+        migrateItemOrder();
+        save();
+        return;
+      }
       state.categories = [...DEFAULT_CATEGORIES];
       state.items = structuredClone(DEFAULT_ITEMS);
       state.selectedIds = [];
@@ -744,10 +767,16 @@
 
     function getItemById(id){ return state.items.find(it => it.id === id); }
 
-    function visibleItemsInCategory(category){
-      const q = (state.search || "").trim().toLowerCase();
+    // Get items in category, sorted by order
+    function getItemsInCategory(category){
       return state.items
         .filter(it => it.category === category)
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    }
+
+    function visibleItemsInCategory(category){
+      const q = (state.search || "").trim().toLowerCase();
+      return getItemsInCategory(category)
         .filter(it => state.showHidden || !it.hidden)
         .filter(it => {
           if(!q) return true;
@@ -769,7 +798,7 @@
       const pos = [];
       const neg = [];
       for(const cat of state.categories){
-        const inCat = state.items.filter(it => it.category === cat && !it.hidden && ids.has(it.id));
+        const inCat = getItemsInCategory(cat).filter(it => !it.hidden && ids.has(it.id));
         for(const it of inCat){
           const t = formatToken(it).trim();
           if(!t) continue;
@@ -801,7 +830,7 @@
       $tabs.innerHTML = "";
       for(const cat of state.categories){
         const el = document.createElement("div");
-        el.className = "tab" + (cat === state.activeCategory ? " active" : "");
+        el.className = "tab" + (cat === state.activeCategory ? " active" : "") + (cat === FIXED_CATEGORY ? " fixed" : "");
         el.textContent = cat;
         el.onclick = () => {
           state.activeCategory = cat;
@@ -815,10 +844,30 @@
       }
     }
 
+    // Swap item order by item.id
+    function swapItemOrder(itemId, direction){
+      const item = getItemById(itemId);
+      if(!item) return;
+      const cat = item.category;
+      const allInCat = getItemsInCategory(cat);
+      const idx = allInCat.findIndex(it => it.id === itemId);
+      if(idx < 0) return;
+      const swapIdx = idx + direction;
+      if(swapIdx < 0 || swapIdx >= allInCat.length) return;
+      // Swap order values
+      const other = allInCat[swapIdx];
+      const tmpOrder = item.order;
+      item.order = other.order;
+      other.order = tmpOrder;
+      save();
+      renderList();
+    }
+
     function renderList(){
       const cat = state.activeCategory;
       const list = visibleItemsInCategory(cat);
-      const totalAllInCat = state.items.filter(it => it.category === cat && (state.showHidden || !it.hidden)).length;
+      const allInCat = getItemsInCategory(cat).filter(it => state.showHidden || !it.hidden);
+      const totalAllInCat = allInCat.length;
       const selectedInCat = countSelectedInCategory(cat);
       $badgeCount.textContent = `${totalAllInCat} items`;
       $badgeSelected.textContent = `${selectedInCat} selected`;
@@ -830,9 +879,11 @@
         $itemList.appendChild(empty);
         return;
       }
-      for(const it of list){
+      for(let i = 0; i < list.length; i++){
+        const it = list[i];
         const row = document.createElement("div");
         row.className = "item" + (it.hidden ? " is-hidden" : "");
+        row.dataset.id = it.id;
 
         const cb = document.createElement("input");
         cb.type = "checkbox";
@@ -857,6 +908,25 @@
 
         const actions = document.createElement("div");
         actions.className = "actions";
+
+        // Order buttons (only if not searching and item is visible)
+        if(!state.search && !it.hidden){
+          const orderBtns = document.createElement("div");
+          orderBtns.className = "order-btns";
+          const btnUp = document.createElement("button");
+          btnUp.className = "small";
+          btnUp.textContent = "↑";
+          btnUp.disabled = i === 0;
+          btnUp.onclick = (e) => { e.stopPropagation(); swapItemOrder(it.id, -1); };
+          const btnDown = document.createElement("button");
+          btnDown.className = "small";
+          btnDown.textContent = "↓";
+          btnDown.disabled = i === list.length - 1;
+          btnDown.onclick = (e) => { e.stopPropagation(); swapItemOrder(it.id, 1); };
+          orderBtns.appendChild(btnUp);
+          orderBtns.appendChild(btnDown);
+          actions.appendChild(orderBtns);
+        }
 
         if(it.hidden){
           const btnShow = document.createElement("button");
@@ -974,7 +1044,7 @@
       $modalTitle.textContent = "項目追加";
       fillModalCategories();
       $mCategory.value = state.activeCategory;
-      $mType.value = (state.activeCategory === "ネガティブ") ? "negative" : "positive";
+      $mType.value = (state.activeCategory === FIXED_CATEGORY) ? "negative" : "positive";
       $mLabel.value = "";
       $mToken.value = "";
       $mNote.value = "";
@@ -1051,10 +1121,13 @@
       }
 
       if(modalMode === "add"){
+        // Calculate next order for this category
+        const itemsInCat = getItemsInCategory(category);
+        const maxOrder = itemsInCat.length > 0 ? Math.max(...itemsInCat.map(it => it.order ?? 0)) : -1;
         const newItem = {
           id: uid(), category, type, label: label || token || `${tokenA}/${tokenB}`,
           token, mode, hasWeight, weight, tokenA, tokenB, ratio,
-          hidden: false, isUserCreated: true, note
+          hidden: false, isUserCreated: true, note, order: maxOrder + 1
         };
         state.items.push(newItem);
         save();
@@ -1068,6 +1141,7 @@
       if(modalMode === "edit" && editingId){
         const it = getItemById(editingId);
         if(!it) return;
+        const oldCategory = it.category;
         it.category = category;
         it.type = type;
         it.label = label || token || `${tokenA}/${tokenB}`;
@@ -1079,6 +1153,12 @@
         it.tokenA = tokenA;
         it.tokenB = tokenB;
         it.ratio = ratio;
+        // If category changed, assign new order at end of new category
+        if(oldCategory !== category){
+          const itemsInNewCat = getItemsInCategory(category);
+          const maxOrder = itemsInNewCat.length > 0 ? Math.max(...itemsInNewCat.map(x => x.order ?? 0)) : -1;
+          it.order = maxOrder + 1;
+        }
         state.activeCategory = category;
         save();
         closeModal();
@@ -1264,7 +1344,8 @@
     }
 
     function openCatModal(){
-      tempCategories = [...state.categories];
+      // Store original and current name for each category to track renames
+      tempCategories = state.categories.map(name => ({ original: name, current: name }));
       renderCatList();
       $newCatName.value = "";
       $catBackdrop.classList.add("show");
@@ -1274,40 +1355,65 @@
 
     function renderCatList(){
       $catList.innerHTML = "";
-      for(let i = 0; i < tempCategories.length; i++){
-        const cat = tempCategories[i];
+      // Separate fixed and non-fixed categories
+      const nonFixed = tempCategories.filter(c => c.current !== FIXED_CATEGORY);
+      const fixed = tempCategories.filter(c => c.current === FIXED_CATEGORY);
+
+      for(let i = 0; i < nonFixed.length; i++){
+        const cat = nonFixed[i];
         const row = document.createElement("div");
         row.className = "cat-row";
+        row.dataset.original = cat.original;
 
         const inp = document.createElement("input");
         inp.className = "cat-inp";
-        inp.value = cat;
-        inp.onchange = () => { tempCategories[i] = inp.value.trim() || cat; };
+        inp.value = cat.current;
+        inp.onchange = () => {
+          const newVal = inp.value.trim();
+          if(newVal && newVal !== FIXED_CATEGORY){
+            cat.current = newVal;
+          } else {
+            inp.value = cat.current;
+          }
+        };
 
         const btnUp = document.createElement("button");
         btnUp.className = "small";
         btnUp.textContent = "↑";
         btnUp.disabled = i === 0;
         btnUp.onclick = () => {
-          [tempCategories[i-1], tempCategories[i]] = [tempCategories[i], tempCategories[i-1]];
-          renderCatList();
+          const idx = tempCategories.indexOf(cat);
+          const prevNonFixed = tempCategories.slice(0, idx).filter(c => c.current !== FIXED_CATEGORY);
+          if(prevNonFixed.length > 0){
+            const prevCat = prevNonFixed[prevNonFixed.length - 1];
+            const prevIdx = tempCategories.indexOf(prevCat);
+            [tempCategories[prevIdx], tempCategories[idx]] = [tempCategories[idx], tempCategories[prevIdx]];
+            renderCatList();
+          }
         };
 
         const btnDown = document.createElement("button");
         btnDown.className = "small";
         btnDown.textContent = "↓";
-        btnDown.disabled = i === tempCategories.length - 1;
+        btnDown.disabled = i === nonFixed.length - 1;
         btnDown.onclick = () => {
-          [tempCategories[i], tempCategories[i+1]] = [tempCategories[i+1], tempCategories[i]];
-          renderCatList();
+          const idx = tempCategories.indexOf(cat);
+          const nextNonFixed = tempCategories.slice(idx + 1).filter(c => c.current !== FIXED_CATEGORY);
+          if(nextNonFixed.length > 0){
+            const nextCat = nextNonFixed[0];
+            const nextIdx = tempCategories.indexOf(nextCat);
+            [tempCategories[idx], tempCategories[nextIdx]] = [tempCategories[nextIdx], tempCategories[idx]];
+            renderCatList();
+          }
         };
 
         const btnDel = document.createElement("button");
         btnDel.className = "small danger";
         btnDel.textContent = "削除";
         btnDel.onclick = () => {
-          if(!confirm(`カテゴリ「${cat}」を削除しますか？\n（このカテゴリの項目は残りますが、タブに表示されなくなります）`)) return;
-          tempCategories.splice(i, 1);
+          if(!confirm(`カテゴリ「${cat.current}」を削除しますか？\n（このカテゴリの項目は残りますが、タブに表示されなくなります）`)) return;
+          const idx = tempCategories.indexOf(cat);
+          tempCategories.splice(idx, 1);
           renderCatList();
         };
 
@@ -1315,6 +1421,27 @@
         row.appendChild(btnUp);
         row.appendChild(btnDown);
         row.appendChild(btnDel);
+        $catList.appendChild(row);
+      }
+
+      // Render fixed category at the end (no reorder/delete buttons)
+      for(const cat of fixed){
+        const row = document.createElement("div");
+        row.className = "cat-row is-fixed";
+        row.dataset.original = cat.original;
+
+        const inp = document.createElement("input");
+        inp.className = "cat-inp";
+        inp.value = cat.current;
+        inp.disabled = true;
+        inp.style.opacity = "0.7";
+
+        const hint = document.createElement("span");
+        hint.style.cssText = "font-size:11px;color:var(--muted)";
+        hint.textContent = "（固定）";
+
+        row.appendChild(inp);
+        row.appendChild(hint);
         $catList.appendChild(row);
       }
     }
@@ -1325,26 +1452,53 @@
         toast("カテゴリ名を入力してください");
         return;
       }
-      if(tempCategories.includes(name)){
+      if(name === FIXED_CATEGORY){
+        toast("この名前は使用できません");
+        return;
+      }
+      if(tempCategories.some(c => c.current === name)){
         toast("同じ名前のカテゴリがあります");
         return;
       }
-      tempCategories.push(name);
+      // Insert before fixed category
+      const fixedIdx = tempCategories.findIndex(c => c.current === FIXED_CATEGORY);
+      if(fixedIdx >= 0){
+        tempCategories.splice(fixedIdx, 0, { original: null, current: name });
+      } else {
+        tempCategories.push({ original: null, current: name });
+      }
       renderCatList();
       $newCatName.value = "";
     }
 
     function saveCatModal(){
-      const oldCats = state.categories;
-      const newCats = tempCategories.filter(c => c);
-      for(let i = 0; i < Math.min(oldCats.length, newCats.length); i++){
-        if(oldCats[i] !== newCats[i]){
-          state.items.forEach(it => {
-            if(it.category === oldCats[i]) it.category = newCats[i];
-          });
+      // Build rename map: only for categories that were renamed (not just reordered)
+      const renames = {};
+      for(const cat of tempCategories){
+        if(cat.original && cat.current && cat.original !== cat.current){
+          renames[cat.original] = cat.current;
         }
       }
-      state.categories = newCats;
+
+      // Apply renames to items (by original category name -> new name)
+      if(Object.keys(renames).length > 0){
+        state.items.forEach(it => {
+          if(renames[it.category]){
+            it.category = renames[it.category];
+          }
+        });
+      }
+
+      // Set new category order (just the current names)
+      state.categories = tempCategories.map(c => c.current).filter(c => c);
+
+      // Ensure fixed category is at the end
+      const fixedIdx = state.categories.indexOf(FIXED_CATEGORY);
+      if(fixedIdx >= 0 && fixedIdx !== state.categories.length - 1){
+        state.categories.splice(fixedIdx, 1);
+        state.categories.push(FIXED_CATEGORY);
+      }
+
       if(!state.categories.includes(state.activeCategory)){
         state.activeCategory = state.categories[0] || "";
       }
@@ -1436,6 +1590,7 @@
           newState.selectedIds = newState.selectedIds.filter(id => itemIds.has(id));
 
           state = newState;
+          migrateItemOrder();
           save();
           renderAll();
           toast("インポートしました");
