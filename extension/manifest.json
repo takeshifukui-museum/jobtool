@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Museum JobTool",
+  "version": "1.0.0",
+  "description": "求人ページから求人票Word文書を生成するツール",
+  "permissions": [
+    "activeTab",
+    "downloads"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "https://*.hrmos.co/*",
+    "https://hrmos.co/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Museum JobTool"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.hrmos.co/*",
+        "https://hrmos.co/*",
+        "https://*.workday.com/*",
+        "https://*.greenhouse.io/*",
+        "https://*.lever.co/*",
+        "https://*.recruitee.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

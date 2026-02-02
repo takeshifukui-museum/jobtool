@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Museum JobTool</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 400px;
+      padding: 16px;
+      font-family: "Segoe UI", "Meiryo", sans-serif;
+      background-color: #f5f5f5;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 16px;
+    }
+
+    .header h1 {
+      font-size: 18px;
+      color: #333;
+      margin-bottom: 4px;
+    }
+
+    .header p {
+      font-size: 12px;
+      color: #666;
+    }
+
+    .input-group {
+      margin-bottom: 12px;
+    }
+
+    .input-group label {
+      display: block;
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 4px;
+    }
+
+    .input-group input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+
+    .input-group input:focus {
+      outline: none;
+      border-color: #4a90d9;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+
+    .btn-primary {
+      background-color: #4a90d9;
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background-color: #3a7bc8;
+    }
+
+    .btn-primary:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background-color: #e0e0e0;
+      color: #333;
+      margin-top: 8px;
+    }
+
+    .btn-secondary:hover {
+      background-color: #d0d0d0;
+    }
+
+    .status {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 13px;
+      display: none;
+    }
+
+    .status.show {
+      display: block;
+    }
+
+    .status.loading {
+      background-color: #e3f2fd;
+      color: #1565c0;
+    }
+
+    .status.success {
+      background-color: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    .status.error {
+      background-color: #ffebee;
+      color: #c62828;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid #1565c0;
+      border-radius: 50%;
+      border-top-color: transparent;
+      animation: spin 1s linear infinite;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .footer {
+      margin-top: 16px;
+      text-align: center;
+      font-size: 11px;
+      color: #999;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Museum JobTool</h1>
+    <p>求人URLから求人票を生成</p>
+  </div>
+
+  <div class="input-group">
+    <label for="url">求人ページURL</label>
+    <input type="url" id="url" placeholder="https://hrmos.co/pages/..." />
+  </div>
+
+  <button class="btn btn-primary" id="generate">求人票を生成</button>
+  <button class="btn btn-secondary" id="useCurrentTab">現在のタブのURLを使用</button>
+
+  <div class="status" id="status"></div>
+
+  <div class="footer">
+    <p>サーバー: http://localhost:3000</p>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
