@@ -1,23 +1,44 @@
 {
   "name": "ai-text-editor",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "AI付きテキストエディタ — メモ帳感覚で書き、右にAI応答を置いて推敲できる",
   "main": "dist/main.js",
+  "author": "",
+  "license": "MIT",
   "scripts": {
     "build:main": "tsc",
     "build:renderer": "esbuild renderer/renderer.ts --bundle --platform=browser --outfile=dist/renderer/renderer.js --sourcemap",
     "build": "npm run build:main && npm run build:renderer",
     "dev": "npm run build && electron .",
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "npm run build && set NODE_OPTIONS=--no-warnings && electron-builder --win --x64"
   },
-  "author": "",
-  "license": "MIT",
   "devDependencies": {
     "electron": "^33.2.0",
+    "electron-builder": "25.1.8",
     "esbuild": "^0.27.3",
     "typescript": "^5.7.0"
   },
   "dependencies": {
     "markdown-it": "^14.1.0"
+  },
+  "build": {
+    "appId": "net.museum.aiTextEditor",
+    "productName": "AI Text Editor",
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

@@ -1,22 +1,32 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-// markdown-it runs in preload (has Node.js access)
+// markdown-it runs in preload
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const MarkdownIt = require("markdown-it");
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
+
+type SavePayload = { text: string; metaJson: string };
+type SaveKind = "saveAs" | "save" | "autosave";
 
 contextBridge.exposeInMainWorld("electronAPI", {
   aiRequest: (text: string, action: string): Promise<string> =>
     ipcRenderer.invoke("ai-request", text, action),
 
-  sendEditorContent: (content: string): void =>
-    ipcRenderer.send("editor-content", content),
+  renderMarkdown: (source: string): string => md.render(source),
 
-  onGetEditorContent: (callback: () => void): void => {
-    ipcRenderer.on("get-editor-content", () => callback());
+  // main -> renderer: 「保存したいのでpayload返して」
+  onRequestSavePayload: (callback: (kind: SaveKind, filePath: string | null) => void): void => {
+    ipcRenderer.on("request-save-payload", (_e, kind: SaveKind, filePath: string | null) => {
+      callback(kind, filePath);
+    });
   },
 
-  renderMarkdown: (source: string): string => {
-    return md.render(source);
+  // renderer -> main: payload送信
+  sendSavePayload: (kind: SaveKind, filePath: string | null, payload: SavePayload): void => {
+    ipcRenderer.send("send-save-payload", kind, filePath, payload);
   },
+
+  // renderer -> main: autosave（直接payload送る方式）
+  autosave: (payload: SavePayload): Promise<{ ok: boolean; filePath?: string; message?: string }> =>
+    ipcRenderer.invoke("autosave", payload),
 });

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Text Editor v0.2</title>
+  <title>AI Text Editor v0.3</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -14,13 +14,24 @@
         <span class="pane-title">Editor</span>
         <span id="char-count" class="char-count">0 文字</span>
       </div>
-      <textarea id="editor" spellcheck="false" placeholder="ここに文章を入力...&#10;Ctrl+Enter でAI実行（選択範囲があればその部分を送信）"></textarea>
+
+      <!-- Editor Shell: line numbers + overlay + textarea -->
+      <div id="editor-shell">
+        <div id="line-numbers" aria-label="line numbers"></div>
+
+        <div id="editor-stack">
+          <pre id="editor-overlay" aria-hidden="true"></pre>
+          <textarea id="editor" spellcheck="false" placeholder="ここに文章を入力...
+Ctrl+Enter でAI実行（選択範囲があればその部分を送信）
+（3分無入力で自動保存）"></textarea>
+        </div>
+      </div>
     </div>
 
     <!-- Splitter -->
     <div id="splitter"></div>
 
-    <!-- Right pane: AI + Preview tabs -->
+    <!-- Right pane -->
     <div id="right-pane" class="pane">
       <div class="pane-header">
         <div class="tabs">
@@ -40,6 +51,7 @@
           <button id="btn-ai-run" title="Ctrl+Enter">AI実行</button>
           <button id="btn-append">右→左へ追記</button>
           <button id="btn-replace">右→左へ置換</button>
+          <button id="btn-unmark">選択範囲のAIマーク解除</button>
         </div>
         <textarea id="ai-output" spellcheck="false" placeholder="AI応答がここに表示されます..."></textarea>
       </div>
