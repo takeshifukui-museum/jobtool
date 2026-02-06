@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Text Editor v0.2</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Left pane: editor -->
+    <div id="left-pane" class="pane">
+      <div class="pane-header">
+        <span class="pane-title">Editor</span>
+        <span id="char-count" class="char-count">0 文字</span>
+      </div>
+      <textarea id="editor" spellcheck="false" placeholder="ここに文章を入力...&#10;Ctrl+Enter でAI実行（選択範囲があればその部分を送信）"></textarea>
+    </div>
+
+    <!-- Splitter -->
+    <div id="splitter"></div>
+
+    <!-- Right pane: AI + Preview tabs -->
+    <div id="right-pane" class="pane">
+      <div class="pane-header">
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="ai">AI</button>
+          <button class="tab-btn" data-tab="preview">Markdown Preview</button>
+        </div>
+      </div>
+
+      <!-- AI tab -->
+      <div id="tab-ai" class="tab-content active">
+        <div class="ai-toolbar">
+          <select id="ai-action">
+            <option value="proofread">校正（proofread）</option>
+            <option value="compress">圧縮（compress）</option>
+            <option value="tone">ビジネス丁寧（tone）</option>
+          </select>
+          <button id="btn-ai-run" title="Ctrl+Enter">AI実行</button>
+          <button id="btn-append">右→左へ追記</button>
+          <button id="btn-replace">右→左へ置換</button>
+        </div>
+        <textarea id="ai-output" spellcheck="false" placeholder="AI応答がここに表示されます..."></textarea>
+      </div>
+
+      <!-- Preview tab -->
+      <div id="tab-preview" class="tab-content">
+        <div id="md-preview" class="md-preview"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="status-bar">
+    <span id="status-text">Ready</span>
+    <span id="font-size-display"></span>
+  </div>
+
+  <script src="../dist/renderer/renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "provider": "openai",
+  "openaiApiKey": "sk-your-api-key-here",
+  "claudeApiKey": "sk-ant-your-api-key-here",
+  "model": "gpt-4o-mini"
+}
