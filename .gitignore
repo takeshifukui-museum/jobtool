@@ -1,0 +1,8 @@
+.cursor/mcp.json
+*.env
+server/data/
+*.docx
+*.log
+node_modules/
+dist/
+build/

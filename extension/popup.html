@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Museum Jobtool</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 12px;
+        min-width: 220px;
+      }
+      button {
+        width: 100%;
+        padding: 8px;
+        font-size: 14px;
+      }
+      #status {
+        margin-top: 8px;
+        font-size: 12px;
+        white-space: pre-line;
+      }
+    </style>
+  </head>
+  <body>
+    <label for="folder">保存先フォルダ名（任意）</label>
+    <input type="text" id="folder" placeholder="例: MuseumJobSheets/" style="width:100%;margin:4px 0;" />
+    <button id="generate">求人票生成</button>
+    <div id="status">待機中</div>
+    <script src="popup.js"></script>
+  </body>
+</html>
