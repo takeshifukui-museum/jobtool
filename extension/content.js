@@ -74,17 +74,28 @@ const extractBestText = () => {
   return best;
 };
 
+/** ページのHTMLを取得（fetch結果として保存用） */
+const captureRawHtml = () => {
+  try {
+    return document.documentElement.outerHTML;
+  } catch {
+    return "";
+  }
+};
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "EXTRACT_PAGE") {
     expandPage()
       .then(() => {
         const picked = extractBestText();
         const rawText = normalizeExtractedText(picked.text);
+        const rawHtml = captureRawHtml();
         sendResponse({
           url: location.href,
           title: document.title,
           jobTitle: pickJobTitle(),
           rawText,
+          rawHtml,
           siteHint: location.hostname.includes("hrmos") ? "HRMOS" : "unknown",
           extractMeta: { source: picked.label, length: rawText.length }
         });
@@ -95,6 +106,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           title: document.title,
           jobTitle: pickJobTitle(),
           rawText: normalizeExtractedText(document.body ? document.body.innerText : ""),
+          rawHtml: captureRawHtml(),
           siteHint: location.hostname.includes("hrmos") ? "HRMOS" : "unknown",
           extractMeta: { source: "body(fallback)", length: (document.body ? document.body.innerText : "").length }
         });

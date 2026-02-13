@@ -9,17 +9,7 @@ import { sanitizeJobPosting } from "./sanitize.js";
 import { normalizeRawText } from "./extract.js";
 import { renderJobDocx, resolveTemplatePath, getTemplateStat } from "./word.js";
 import { JobPosting } from "./schema.js";
-
-// #region agent log (debug mode)
-const DEBUG_ENDPOINT = "http://127.0.0.1:7243/ingest/17ed477e-d29e-46f0-9713-bddaa4a1a07d";
-const dbg = (payload: { location: string; message: string; data?: Record<string, unknown>; runId: string; hypothesisId: string }) => {
-  fetch(DEBUG_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...payload, timestamp: Date.now() })
-  }).catch(() => {});
-};
-// #endregion
+import { checkFaithfulness } from "./validate.js";
 
 const log = (msg: string, data?: Record<string, unknown>) => {
   console.log(`[generate] ${msg}`, data ?? "");
@@ -27,6 +17,10 @@ const log = (msg: string, data?: Record<string, unknown>) => {
 
 const DATA_DIR = path.resolve(process.cwd(), "data");
 const MIN_EXTRACTED_CHARS = Number(process.env.MIN_EXTRACTED_CHARS || 300);
+
+// ---------------------------------------------------------------------------
+// ユーティリティ
+// ---------------------------------------------------------------------------
 
 const sanitizePathSegment = (s: string, maxLen = 50): string => {
   return s
@@ -128,23 +122,42 @@ const ensureDataDir = (dir: string): void => {
   fs.mkdirSync(dir, { recursive: true });
 };
 
-const saveIntermediateArtifacts = (
-  dir: string,
-  payload: {
-    job_raw: string;
-    job_structured: string;
-    job_json: JobPosting;
-    output_docx: Buffer;
-    meta: Record<string, unknown>;
-  }
-): void => {
-  ensureDataDir(dir);
-  fs.writeFileSync(path.join(dir, "job_raw.md"), payload.job_raw, "utf8");
-  fs.writeFileSync(path.join(dir, "job_structured.md"), payload.job_structured, "utf8");
-  fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify(payload.job_json, null, 2), "utf8");
-  fs.writeFileSync(path.join(dir, "output.docx"), payload.output_docx);
-  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(payload.meta, null, 2), "utf8");
+/** artifactDir を作成してパスを返す */
+const buildArtifactDir = (companyName: string, positionTitle: string, url: string): string => {
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const companyPart = sanitizePathSegment(companyName);
+  const positionPart = sanitizePathSegment(positionTitle);
+  const hash = crypto
+    .createHash("sha256")
+    .update(String(url ?? "") + String(Date.now()))
+    .digest("hex")
+    .slice(0, 8);
+  return path.join(DATA_DIR, dateStr, `${companyPart}_${positionPart}_${hash}`);
 };
+
+/** artifactDir のパスから sessionId を導出（DATA_DIR からの相対パス） */
+const toSessionId = (artifactDir: string): string => {
+  return path.relative(DATA_DIR, artifactDir);
+};
+
+/** sessionId を検証して絶対パスに戻す */
+const resolveSessionDir = (sessionId: string): string | null => {
+  // パストラバーサル防止
+  if (!sessionId || sessionId.includes("..") || path.isAbsolute(sessionId)) return null;
+  const resolved = path.resolve(DATA_DIR, sessionId);
+  if (!resolved.startsWith(DATA_DIR)) return null;
+  try {
+    const stat = fs.statSync(resolved);
+    if (!stat.isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  return resolved;
+};
+
+// ---------------------------------------------------------------------------
+// Express app
+// ---------------------------------------------------------------------------
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -165,33 +178,30 @@ app.use(
 );
 app.use(express.json({ limit: "4mb" }));
 
+// ===========================================================================
+// POST /api/generate — fetch/extract/structure → プレビュー用データ返却
+//   Word生成はしない。ユーザーがプレビュー確認後に /api/render を呼ぶ。
+// ===========================================================================
 app.post("/api/generate", async (req, res) => {
   try {
-    const { url, title, rawText, siteHint } = req.body ?? {};
+    const { url, title, rawText, rawHtml, siteHint, jobTitle, extractMeta } = req.body ?? {};
 
-    // #region agent log (debug mode)
-    dbg({
-      location: "server/src/index.ts:api_generate:entry",
-      message: "request received",
-      data: {
-        hasUrl: Boolean(url),
-        hasTitle: Boolean(title),
-        hasJobTitle: typeof req.body?.jobTitle === "string",
-        rawTextLen: typeof rawText === "string" ? rawText.length : String(rawText ?? "").length,
-        siteHint: typeof siteHint === "string" ? siteHint : undefined
-      },
-      runId: "pre-fix",
-      hypothesisId: "H4_H5"
-    });
-    // #endregion
-
+    // -----------------------------------------------------------------------
+    // (A-1) fetch ガード: rawText 必須
+    // -----------------------------------------------------------------------
     if (!rawText || String(rawText).trim() === "") {
-      return res.status(400).json({ error: { code: "TEXT_EXTRACTION_EMPTY", message: "rawText is empty" } });
+      return res.status(400).json({
+        error: { code: "TEXT_EXTRACTION_EMPTY", message: "rawText is empty — ページ本文が取得できませんでした。" }
+      });
     }
 
+    // -----------------------------------------------------------------------
+    // (A-1) extract: 正規化 + 文字数チェック
+    // -----------------------------------------------------------------------
     const normalizedText = normalizeRawText(String(rawText));
     const extractedLength = normalizedText.length;
     log("抽出テキスト文字数", { extractedLength, min: MIN_EXTRACTED_CHARS });
+
     if (extractedLength === 0) {
       return res.status(400).json({
         error: { code: "TEXT_EXTRACTION_EMPTY", message: "抽出テキストが0文字です。ページ本文を取得できませんでした。" }
@@ -206,25 +216,10 @@ app.post("/api/generate", async (req, res) => {
       });
     }
 
-    // #region agent log (debug mode)
-    dbg({
-      location: "server/src/index.ts:api_generate:before_openai",
-      message: "calling OpenAI for structured job",
-      data: {
-        urlHost: (() => {
-          try {
-            return new URL(String(url ?? "")).host;
-          } catch {
-            return null;
-          }
-        })(),
-        normalizedLen: normalizedText.length
-      },
-      runId: "pre-fix",
-      hypothesisId: "H1_H2_H3"
-    });
-    // #endregion
-
+    // -----------------------------------------------------------------------
+    // (B) structure: OpenAI で構造化
+    // -----------------------------------------------------------------------
+    log("OpenAI構造化開始");
     const job = await generateJobPosting({
       url: String(url ?? ""),
       title: String(title ?? ""),
@@ -237,45 +232,226 @@ app.post("/api/generate", async (req, res) => {
       compliance: job.compliance ?? { forbiddenDetected: [], warnings: [] }
     };
 
+    // sanitize（禁止転載除去）
     const { sanitized, forbiddenDetected } = sanitizeJobPosting(jobWithCompliance);
-    sanitized.compliance.forbiddenDetected = Array.from(new Set([...sanitized.compliance.forbiddenDetected, ...forbiddenDetected]));
+    sanitized.compliance.forbiddenDetected = Array.from(
+      new Set([...sanitized.compliance.forbiddenDetected, ...forbiddenDetected])
+    );
 
-    const companyNameLen = sanitized.company?.name?.length ?? 0;
-    const positionTitleLen = sanitized.position?.title?.length ?? 0;
-    const jobRespLen = sanitized.job?.responsibilities?.length ?? 0;
-    const salarySummaryLen = sanitized.salary?.summary?.length ?? 0;
-    log("OpenAI構造化JSON主要項目", {
-      companyNameLen,
-      positionTitleLen,
-      jobRespLen,
-      salarySummaryLen
-    });
-    if (!sanitized.company?.name?.trim() || !sanitized.position?.title?.trim()) {
+    // -----------------------------------------------------------------------
+    // (2) 空の求人票 根絶ガード
+    // -----------------------------------------------------------------------
+    if (!sanitized.company?.name?.trim()) {
       return res.status(400).json({
-        error: {
-          code: "JOB_JSON_EMPTY_OR_INVALID",
-          message: "構造化結果に企業名またはポジション名がありません。"
-        }
+        error: { code: "JOB_JSON_EMPTY_OR_INVALID", message: "構造化結果に企業名がありません。ページが求人情報ではない可能性があります。" }
+      });
+    }
+    if (!sanitized.position?.title?.trim()) {
+      return res.status(400).json({
+        error: { code: "JOB_JSON_EMPTY_OR_INVALID", message: "構造化結果にポジション名がありません。" }
+      });
+    }
+    if (!sanitized.salary.summary || sanitized.salary.summary.trim() === "") {
+      return res.status(400).json({
+        error: { code: "SALARY_REQUIRED", message: "賃金情報が取得できませんでした。原文に賃金の記載があるか確認してください。" }
       });
     }
 
+    const mainFieldsFilled = [
+      sanitized.job.responsibilities?.length > 0,
+      sanitized.requirements.must?.length > 0 || sanitized.requirements.want?.length > 0,
+      Boolean(sanitized.work.location?.trim()),
+      Boolean(sanitized.salary.summary?.trim())
+    ];
+    const filledCount = mainFieldsFilled.filter(Boolean).length;
+    if (filledCount === 0) {
+      return res.status(400).json({
+        error: { code: "JOB_JSON_ALL_EMPTY", message: "構造化結果の主要項目がすべて空です。取得したテキストが求人情報ではない可能性があります。" }
+      });
+    }
+
+    // 時間外労働: 情報が無い場合は項目自体を削除
+    if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
+      delete sanitized.work.overtime;
+    }
+
+    // -----------------------------------------------------------------------
+    // (3) 言い換え禁止の機械チェック
+    // -----------------------------------------------------------------------
+    const faithViolations = checkFaithfulness(sanitized, normalizedText);
     const warnings: string[] = [];
+
     if (!sanitized.job.responsibilities || sanitized.job.responsibilities.length === 0) {
       warnings.push("RESPONSIBILITIES_EMPTY");
     }
     if (!sanitized.requirements.must || sanitized.requirements.must.length === 0) {
       warnings.push("REQUIREMENTS_MUST_EMPTY");
     }
-
-    if (!sanitized.salary.summary || sanitized.salary.summary.trim() === "") {
-      return res.status(400).json({ error: { code: "SALARY_REQUIRED", message: "salary.summary is required" } });
+    if (faithViolations.length > 0) {
+      warnings.push("FAITHFULNESS_VIOLATIONS_DETECTED");
+      log("言い換え検出", { count: faithViolations.length, fields: faithViolations.map((v) => v.field) });
     }
 
-    if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
-      delete sanitized.work.overtime;
+    // 致命的な言い換え（5件以上）はエラーにする
+    if (faithViolations.length >= 5) {
+      return res.status(400).json({
+        error: {
+          code: "FAITHFULNESS_CHECK_FAILED",
+          message: `原文忠実性チェックに失敗しました（${faithViolations.length}件の言い換え検出）。AIが原文を大幅に改変しています。`,
+          violations: faithViolations
+        }
+      });
     }
 
-    const scoutText = await generateScoutText(sanitized);
+    // -----------------------------------------------------------------------
+    // プレビュー用成果物を保存
+    // -----------------------------------------------------------------------
+    const structuredMd = buildStructuredMarkdown(sanitized);
+    const artifactDir = buildArtifactDir(sanitized.company.name, sanitized.position.title, String(url ?? ""));
+    const metaWarnings = [...warnings, ...sanitized.compliance.warnings];
+
+    ensureDataDir(artifactDir);
+
+    // job_raw.html（取り込み結果 — Content Scriptから送られたHTML）
+    if (rawHtml && typeof rawHtml === "string") {
+      fs.writeFileSync(path.join(artifactDir, "job_raw.html"), rawHtml, "utf8");
+    }
+
+    // job_raw.md（抽出結果）
+    fs.writeFileSync(path.join(artifactDir, "job_raw.md"), normalizedText, "utf8");
+
+    // extract_report.json
+    const extractReport = {
+      url: url || null,
+      siteHint: siteHint || null,
+      extractMeta: extractMeta ?? null,
+      extractedLength,
+      minExtractedChars: MIN_EXTRACTED_CHARS,
+      timestamp: new Date().toISOString()
+    };
+    fs.writeFileSync(path.join(artifactDir, "extract_report.json"), JSON.stringify(extractReport, null, 2), "utf8");
+
+    // job_structured.md（プレビュー用）
+    fs.writeFileSync(path.join(artifactDir, "job_structured.md"), structuredMd, "utf8");
+
+    // job.json（差し込み用）
+    fs.writeFileSync(path.join(artifactDir, "job.json"), JSON.stringify(sanitized, null, 2), "utf8");
+
+    // meta.json
+    const meta = {
+      warnings: metaWarnings,
+      faithViolations: faithViolations.length > 0 ? faithViolations : undefined,
+      url: url || undefined,
+      title: title || undefined,
+      jobTitle: typeof jobTitle === "string" ? jobTitle : undefined,
+      siteHint: siteHint || undefined,
+      extractedLength,
+      companyName: sanitized.company.name,
+      positionTitle: sanitized.position.title,
+      savedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(path.join(artifactDir, "meta.json"), JSON.stringify(meta, null, 2), "utf8");
+
+    const sessionId = toSessionId(artifactDir);
+    log("プレビュー成果物保存完了", { sessionId, artifactDir });
+
+    // -----------------------------------------------------------------------
+    // レスポンス: プレビュー用データ（docxは含まない）
+    // -----------------------------------------------------------------------
+    return res.json({
+      sessionId,
+      job: sanitized,
+      structuredMd,
+      suggestedFilename: buildSuggestedFilename(
+        typeof jobTitle === "string" ? jobTitle : typeof title === "string" ? title : undefined,
+        sanitized.position.title
+      ),
+      meta: {
+        warnings: metaWarnings,
+        faithViolations: faithViolations.length > 0 ? faithViolations : undefined
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    const detail = error instanceof Error ? error.message : String(error);
+    let code = "INTERNAL_ERROR";
+    let message = "不明なエラーが発生しました";
+    if (detail === "LLM_INVALID_JSON" || detail.includes("LLM_INVALID_JSON")) {
+      code = "LLM_INVALID_JSON";
+      message = "AIの構造化結果が不正です。もう一度お試しください。";
+    } else if (detail) {
+      message = detail;
+    }
+    return res.status(500).json({ error: { code, message, detail } });
+  }
+});
+
+// ===========================================================================
+// POST /api/render — プレビュー確認後の Word 生成 + スカウト文
+//   sessionId を受け取り、保存済み job.json から docx を生成する。
+// ===========================================================================
+app.post("/api/render", async (req, res) => {
+  try {
+    const { sessionId } = req.body ?? {};
+
+    if (!sessionId || typeof sessionId !== "string") {
+      return res.status(400).json({
+        error: { code: "SESSION_ID_REQUIRED", message: "sessionId が必要です。先に /api/generate を実行してください。" }
+      });
+    }
+
+    const artifactDir = resolveSessionDir(sessionId);
+    if (!artifactDir) {
+      return res.status(400).json({
+        error: { code: "SESSION_NOT_FOUND", message: `セッション '${sessionId}' が見つかりません。` }
+      });
+    }
+
+    // job.json を読み込む
+    const jobJsonPath = path.join(artifactDir, "job.json");
+    if (!fs.existsSync(jobJsonPath)) {
+      return res.status(400).json({
+        error: { code: "JOB_JSON_NOT_FOUND", message: "job.json が見つかりません。先に /api/generate を実行してください。" }
+      });
+    }
+    const sanitized: JobPosting = JSON.parse(fs.readFileSync(jobJsonPath, "utf8"));
+
+    // -----------------------------------------------------------------------
+    // render 前ガード: 差し込み対象の行数が0ならエラー
+    // -----------------------------------------------------------------------
+    const renderableFields = [
+      sanitized.company?.name,
+      sanitized.position?.title,
+      sanitized.salary?.summary,
+      ...(sanitized.job?.responsibilities ?? []),
+      sanitized.work?.location,
+      sanitized.work?.hours,
+      sanitized.work?.holidays,
+      ...(sanitized.benefits?.items ?? [])
+    ].filter((v) => v && String(v).trim() !== "");
+
+    if (renderableFields.length === 0) {
+      return res.status(400).json({
+        error: { code: "RENDER_NO_DATA", message: "差し込み対象のデータが0件です。job.json の内容を確認してください。" }
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // 必須項目チェック（render前の最終防衛）
+    // -----------------------------------------------------------------------
+    if (!sanitized.company?.name?.trim()) {
+      return res.status(400).json({ error: { code: "REQUIRED_FIELD_MISSING", message: "企業名が空です。" } });
+    }
+    if (!sanitized.position?.title?.trim()) {
+      return res.status(400).json({ error: { code: "REQUIRED_FIELD_MISSING", message: "ポジション名が空です。" } });
+    }
+    if (!sanitized.salary?.summary?.trim()) {
+      return res.status(400).json({ error: { code: "REQUIRED_FIELD_MISSING", message: "賃金情報が空です。" } });
+    }
+
+    // -----------------------------------------------------------------------
+    // テンプレート解決
+    // -----------------------------------------------------------------------
     let templatePath: string;
     try {
       templatePath = resolveTemplatePath();
@@ -287,7 +463,6 @@ app.post("/api/generate", async (req, res) => {
       });
     }
     const templateStat = getTemplateStat(templatePath);
-    log("テンプレートファイル", { path: templatePath, exists: templateStat.exists, size: templateStat.size });
     if (!templateStat.exists || templateStat.size === 0) {
       return res.status(500).json({
         error: {
@@ -297,13 +472,21 @@ app.post("/api/generate", async (req, res) => {
       });
     }
 
+    // -----------------------------------------------------------------------
+    // Word 生成
+    // -----------------------------------------------------------------------
     let docxBuffer: Buffer;
     try {
       log("Word差し込み開始", { templatePath });
-      docxBuffer = await renderJobDocx(sanitized, templatePath, {
-        rawText: typeof req.body?.rawText === "string" ? req.body.rawText : normalizedText,
-        jobTitle: typeof req.body?.jobTitle === "string" ? req.body.jobTitle : undefined
-      });
+      // meta.json から jobTitle を取得
+      let jobTitle: string | undefined;
+      try {
+        const metaPath = path.join(artifactDir, "meta.json");
+        const metaData = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+        jobTitle = metaData.jobTitle;
+      } catch { /* ignore */ }
+
+      docxBuffer = await renderJobDocx(sanitized, templatePath, { jobTitle });
       log("Word差し込み完了", { outputSize: docxBuffer.length });
     } catch (error) {
       console.error(error);
@@ -313,47 +496,33 @@ app.post("/api/generate", async (req, res) => {
         .json({ error: { code: "DOCX_RENDER_FAIL", message: "Word生成に失敗しました", detail } });
     }
 
-    const metaWarnings = [...warnings, ...sanitized.compliance.warnings];
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const companyPart = sanitizePathSegment(sanitized.company.name);
-    const positionPart = sanitizePathSegment(sanitized.position.title);
-    const hash = crypto
-      .createHash("sha256")
-      .update(String(url ?? "") + String(Date.now()))
-      .digest("hex")
-      .slice(0, 8);
-    const artifactDir = path.join(DATA_DIR, dateStr, `${companyPart}_${positionPart}_${hash}`);
+    // -----------------------------------------------------------------------
+    // スカウト文生成
+    // -----------------------------------------------------------------------
+    const scoutText = await generateScoutText(sanitized);
 
+    // -----------------------------------------------------------------------
+    // output.docx 保存
+    // -----------------------------------------------------------------------
+    fs.writeFileSync(path.join(artifactDir, "output.docx"), docxBuffer);
+    log("output.docx 保存完了", { dir: artifactDir });
+
+    // meta.json に render 情報を追記
     try {
-      saveIntermediateArtifacts(artifactDir, {
-        job_raw: normalizedText,
-        job_structured: buildStructuredMarkdown(sanitized),
-        job_json: sanitized,
-        output_docx: docxBuffer,
-        meta: {
-          warnings: metaWarnings,
-          url: url || undefined,
-          title: title || undefined,
-          jobTitle: typeof req.body?.jobTitle === "string" ? req.body.jobTitle : undefined,
-          siteHint: siteHint || undefined,
-          extractedLength: normalizedText.length,
-          minExtractedChars: MIN_EXTRACTED_CHARS,
-          extractMeta: req.body?.extractMeta ?? undefined,
-          templatePath,
-          templateSize: templateStat.size,
-          companyNameLen,
-          positionTitleLen,
-          jobRespLen,
-          salarySummaryLen,
-          savedAt: new Date().toISOString()
-        }
-      });
-    } catch (saveError) {
-      console.error("Failed to save intermediate artifacts:", saveError);
-    }
+      const metaPath = path.join(artifactDir, "meta.json");
+      const metaData = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      metaData.renderedAt = new Date().toISOString();
+      metaData.templatePath = templatePath;
+      metaData.templateSize = templateStat.size;
+      metaData.docxSize = docxBuffer.length;
+      fs.writeFileSync(metaPath, JSON.stringify(metaData, null, 2), "utf8");
+    } catch { /* ignore */ }
 
+    // -----------------------------------------------------------------------
+    // レスポンス
+    // -----------------------------------------------------------------------
     const suggestedFilename = buildSuggestedFilename(
-      typeof req.body?.jobTitle === "string" ? req.body.jobTitle : typeof req.body?.title === "string" ? req.body.title : undefined,
+      sanitized.position.title,
       sanitized.position.title
     );
     const docxBase64 = docxBuffer.toString("base64");
@@ -361,9 +530,7 @@ app.post("/api/generate", async (req, res) => {
       docx: docxBase64,
       scoutText,
       suggestedFilename,
-      meta: {
-        warnings: metaWarnings
-      }
+      meta: { warnings: sanitized.compliance?.warnings ?? [] }
     });
   } catch (error) {
     console.error(error);
@@ -376,9 +543,6 @@ app.post("/api/generate", async (req, res) => {
     } else if (detail.includes("Word差し込みに失敗") || detail.includes("docx")) {
       code = "DOCX_RENDER_FAIL";
       message = detail;
-    } else if (detail === "LLM_INVALID_JSON" || detail.includes("LLM_INVALID_JSON")) {
-      code = "LLM_INVALID_JSON";
-      message = "AIの構造化結果が不正です。もう一度お試しください。";
     } else if (detail) {
       message = detail;
     }

@@ -5,26 +5,83 @@
     <title>Museum Jobtool</title>
     <style>
       body {
-        font-family: Arial, sans-serif;
+        font-family: "BIZ UDPゴシック", Arial, sans-serif;
         margin: 12px;
-        min-width: 220px;
+        min-width: 400px;
+        max-width: 500px;
       }
+      label { font-size: 12px; }
+      input[type="text"] { width: 100%; margin: 4px 0; box-sizing: border-box; }
       button {
         width: 100%;
         padding: 8px;
         font-size: 14px;
+        margin-top: 4px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      #btn-render {
+        background: #2563eb;
+        color: #fff;
+        border: 1px solid #1d4ed8;
+        border-radius: 4px;
+      }
+      #btn-cancel {
+        background: #e5e7eb;
+        color: #333;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
       }
       #status {
         margin-top: 8px;
         font-size: 12px;
         white-space: pre-line;
       }
+      #preview-area {
+        display: none;
+        margin-top: 8px;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        max-height: 360px;
+        overflow-y: auto;
+        padding: 8px;
+        font-size: 11px;
+        background: #f9fafb;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      #warnings {
+        display: none;
+        margin-top: 4px;
+        padding: 6px;
+        background: #fef3c7;
+        border: 1px solid #f59e0b;
+        border-radius: 4px;
+        font-size: 11px;
+      }
+      .btn-row {
+        display: none;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .btn-row button { width: auto; flex: 1; }
     </style>
   </head>
   <body>
     <label for="folder">保存先フォルダ名（任意）</label>
-    <input type="text" id="folder" placeholder="例: MuseumJobSheets/" style="width:100%;margin:4px 0;" />
-    <button id="generate">求人票生成</button>
+    <input type="text" id="folder" placeholder="例: MuseumJobSheets/" />
+    <button id="btn-generate">求人票を解析</button>
+
+    <div id="warnings"></div>
+    <div id="preview-area"></div>
+    <div class="btn-row" id="btn-row">
+      <button id="btn-render">OK — Word生成</button>
+      <button id="btn-cancel">キャンセル</button>
+    </div>
+
     <div id="status">待機中</div>
     <script src="popup.js"></script>
   </body>

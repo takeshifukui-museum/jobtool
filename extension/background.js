@@ -1,14 +1,6 @@
-const API_URL = "http://localhost:3000/api/generate";
-// #region agent log (debug mode)
-const DEBUG_ENDPOINT = "http://127.0.0.1:7243/ingest/17ed477e-d29e-46f0-9713-bddaa4a1a07d";
-const dbg = (payload) => {
-  fetch(DEBUG_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...payload, timestamp: Date.now() })
-  }).catch(() => {});
-};
-// #endregion
+const API_BASE = "http://localhost:3000";
+const API_GENERATE = `${API_BASE}/api/generate`;
+const API_RENDER = `${API_BASE}/api/render`;
 
 const base64ToDataUrl = (base64, contentType) => {
   return `data:${contentType};base64,${base64}`;
@@ -76,75 +68,88 @@ const extractFromTab = async (tabId) => {
   }
 };
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type !== "GENERATE_JOB_DOCX") {
-    return;
+/** API にPOSTしてJSONまたはエラーを返す */
+const apiPost = async (url, body) => {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = null;
   }
+  if (!response.ok) {
+    const detail = data?.error?.message || data?.error?.detail || data?.error?.code || text || "APIエラー";
+    throw new Error(detail);
+  }
+  return data;
+};
 
-  chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
-    try {
-      const tab = tabs[0];
-      if (!tab || !tab.id) {
-        sendResponse({ ok: false, message: "アクティブタブが見つかりません" });
-        return;
-      }
-      const payload = await extractFromTab(tab.id);
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // -----------------------------------------------------------------------
+  // Step 1: GENERATE_JOB_PREVIEW — 解析してプレビューデータを返す
+  // -----------------------------------------------------------------------
+  if (message.type === "GENERATE_JOB_PREVIEW") {
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      try {
+        const tab = tabs[0];
+        if (!tab || !tab.id) {
+          sendResponse({ ok: false, message: "アクティブタブが見つかりません" });
+          return;
+        }
+        const payload = await extractFromTab(tab.id);
 
-      // #region agent log (debug mode)
-      dbg({
-        location: "extension/background.js:before_fetch",
-        message: "posting to server /api/generate",
-        data: {
-          urlHost: (() => {
-            try {
-              return new URL(payload?.url || "").host;
-            } catch {
-              return null;
-            }
-          })(),
-          rawTextLen: (payload?.rawText || "").length,
-          hasFolderName: Boolean(message.folderName)
-        },
-        runId: "pre-fix",
-        hypothesisId: "H5"
-      });
-      // #endregion
-
-      const response = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        const data = await apiPost(API_GENERATE, {
           ...payload,
           outputs: ["job_docx", "scout_text"]
-        })
-      });
-      if (!response.ok) {
-        const responseText = await response.text();
-        let detailMessage = responseText;
-        try {
-          const errorData = JSON.parse(responseText);
-          detailMessage =
-            errorData?.error?.detail || errorData?.error?.message || errorData?.error?.code || responseText;
-        } catch (parseError) {
-          detailMessage = responseText || "APIエラー";
-        }
-        sendResponse({ ok: false, message: detailMessage });
-        return;
-      }
-      const data = await response.json();
-      const filename = buildDownloadFilename(message.folderName, data.suggestedFilename);
-      const contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-      const url = base64ToDataUrl(data.docx, contentType);
-      await chrome.downloads.download({
-        url,
-        filename,
-        saveAs: true
-      });
-      sendResponse({ ok: true, message: "ダウンロードしました", scoutText: data.scoutText || "" });
-    } catch (error) {
-      sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
-    }
-  });
+        });
 
-  return true;
+        sendResponse({
+          ok: true,
+          sessionId: data.sessionId,
+          job: data.job,
+          structuredMd: data.structuredMd,
+          suggestedFilename: data.suggestedFilename,
+          meta: data.meta
+        });
+      } catch (error) {
+        sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
+      }
+    });
+    return true;
+  }
+
+  // -----------------------------------------------------------------------
+  // Step 2: RENDER_JOB_DOCX — 確認後にWord生成 & ダウンロード
+  // -----------------------------------------------------------------------
+  if (message.type === "RENDER_JOB_DOCX") {
+    (async () => {
+      try {
+        const { sessionId, folderName, suggestedFilename } = message;
+        if (!sessionId) {
+          sendResponse({ ok: false, message: "sessionId がありません" });
+          return;
+        }
+
+        const data = await apiPost(API_RENDER, { sessionId });
+
+        const filename = buildDownloadFilename(folderName, data.suggestedFilename || suggestedFilename);
+        const contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        const url = base64ToDataUrl(data.docx, contentType);
+        await chrome.downloads.download({
+          url,
+          filename,
+          saveAs: true
+        });
+        sendResponse({ ok: true, message: "ダウンロードしました", scoutText: data.scoutText || "" });
+      } catch (error) {
+        sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
+      }
+    })();
+    return true;
+  }
 });
