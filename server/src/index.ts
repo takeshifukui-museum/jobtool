@@ -374,9 +374,13 @@ app.post("/api/generate", async (req, res) => {
   } catch (error) {
     console.error(error);
     const detail = error instanceof Error ? error.message : String(error);
+    const status = (error as any)?.status ?? (error as any)?.response?.status;
     let code = "INTERNAL_ERROR";
     let message = "不明なエラーが発生しました";
-    if (detail === "LLM_INVALID_JSON" || detail.includes("LLM_INVALID_JSON")) {
+    if (status === 429 || detail.includes("429") || detail.includes("quota")) {
+      code = "OPENAI_QUOTA_EXCEEDED";
+      message = "OpenAI APIの利用上限に達しています。ダッシュボードで課金状況を確認してください。";
+    } else if (detail === "LLM_INVALID_JSON" || detail.includes("LLM_INVALID_JSON")) {
       code = "LLM_INVALID_JSON";
       message = "AIの構造化結果が不正です。もう一度お試しください。";
     } else if (detail) {
