@@ -36,6 +36,7 @@ ${input.rawText}
 - JSONスキーマに厳密準拠
 - schemaVersion は museum_jobposting_v1
 - あなたの仕事は「要約」ではなく「分類」です。原文の順序をできるだけ保ち、原文に無い推測はしない
+- 出力する値は上記「本文」からのみ抽出すること。推測・補完・他の求人情報の混入は厳禁
 - 【加工禁止＝原文そのまま必須】次の項目は、本文から該当箇所をできるだけそのままコピペして格納する（言い換え・要約・再構成禁止）
   - 業務内容: job.responsibilities[]（原文の箇条書き/文を1行ずつ、順序維持）
   - 求める経験・スキル（必須/歓迎）: requirements.must[] / requirements.want[]（原文の箇条書き/文を1行ずつ、順序維持）
@@ -48,9 +49,24 @@ ${input.rawText}
   - salary.fixedOvertime.includedHours に時間数（原文そのまま。例: "月45時間分"）
   - salary.fixedOvertime.excessPayment に超過分の扱い（原文そのまま。例: "超過分は別途支給"）
   - 各項目が無い場合は空文字でよい
-- 時間外労働: 情報が無い場合は work.overtime.exists=false, details=\"\" とする（推測しない）
+- 時間外労働: 情報が無い場合は work.overtime.exists=false, details="" とする（推測しない）
+- 「契約社員となる場合」等の注記がある場合は position.employmentType または position.contractTerm に含める（原文準拠）
 - compliance.forbiddenDetected/warnings は空配列でよい
 - 禁止転載(性別/年齢/国籍/病歴)は含めない
+
+# evidence（根拠）ルール — 最重要
+以下の主要項目には必ず evidence フィールドを返すこと。
+evidence は「本文」中にそのまま存在する短い抜粋（10〜80文字程度）を格納する。
+evidence が見つからない項目は、値も evidence も空文字で返す（無理に埋めない）。
+
+- company.nameEvidence: 企業名の根拠（本文中の該当箇所をそのまま抜粋）
+- position.titleEvidence: ポジション名の根拠
+- position.employmentTypeEvidence: 雇用形態の根拠
+- position.contractTermEvidence: 契約期間の根拠
+- work.locationEvidence: 勤務地の根拠
+- salary.summaryEvidence: 賃金の根拠
+
+例: company.name="株式会社サンプル" → company.nameEvidence="募集企業 株式会社サンプル"
 `;
 };
 

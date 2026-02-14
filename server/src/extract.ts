@@ -6,7 +6,23 @@ export const listToText = (items?: string[]): string => {
   if (!items || items.length === 0) {
     return "";
   }
-  return items.filter((item) => item && item.trim() !== "").map((item) => `・${item}`).join("\n");
+  return items
+    .filter((item) => item && item.trim() !== "")
+    .map((item) => {
+      // 先頭の「・」「■」「●」「-」を除去して再付与（二重ブレット防止）
+      const cleaned = item.replace(/^[・■●\-]\s*/, "").trim();
+      return cleaned ? `・${cleaned}` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+};
+
+// ---------------------------------------------------------------------------
+// 箇条書き整形: "・A ・B" → "\n・A\n・B" に分割（意味変更なし）
+// ---------------------------------------------------------------------------
+export const formatBullets = (text: string): string => {
+  // 行内の「 ・」を改行 + 「・」に置換
+  return text.replace(/ ・/g, "\n・");
 };
 
 // ---------------------------------------------------------------------------

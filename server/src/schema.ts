@@ -17,20 +17,24 @@ export const jobPostingSchema = {
     company: {
       type: "object",
       additionalProperties: false,
-      required: ["name", "summary"],
+      required: ["name", "nameEvidence", "summary"],
       properties: {
         name: { type: "string" },
+        nameEvidence: { type: "string" },
         summary: { type: "string" }
       }
     },
     position: {
       type: "object",
       additionalProperties: false,
-      required: ["title", "employmentType", "contractTerm", "probation", "background"],
+      required: ["title", "titleEvidence", "employmentType", "employmentTypeEvidence", "contractTerm", "contractTermEvidence", "probation", "background"],
       properties: {
         title: { type: "string" },
+        titleEvidence: { type: "string" },
         employmentType: { type: "string" },
+        employmentTypeEvidence: { type: "string" },
         contractTerm: { type: "string" },
+        contractTermEvidence: { type: "string" },
         probation: { type: "string" },
         background: { type: "string" }
       }
@@ -58,9 +62,10 @@ export const jobPostingSchema = {
     work: {
       type: "object",
       additionalProperties: false,
-      required: ["location", "hours", "breakTime", "holidays", "remotePolicy", "overtime"],
+      required: ["location", "locationEvidence", "hours", "breakTime", "holidays", "remotePolicy", "overtime"],
       properties: {
         location: { type: "string" },
+        locationEvidence: { type: "string" },
         hours: { type: "string" },
         breakTime: { type: "string" },
         holidays: { type: "string" },
@@ -79,9 +84,10 @@ export const jobPostingSchema = {
     salary: {
       type: "object",
       additionalProperties: false,
-      required: ["summary", "details", "fixedOvertime"],
+      required: ["summary", "summaryEvidence", "details", "fixedOvertime"],
       properties: {
         summary: { type: "string" },
+        summaryEvidence: { type: "string" },
         details: { type: "array", items: { type: "string" } },
         fixedOvertime: {
           type: "object",
@@ -135,12 +141,22 @@ export const jobPostingSchema = {
 export type JobPosting = {
   schemaVersion: "museum_jobposting_v1";
   source: { url: string; site: string; capturedAt?: string };
-  company: { name: string; summary?: string };
-  position: { title: string; employmentType?: string; contractTerm?: string; probation?: string; background?: string };
+  company: { name: string; nameEvidence?: string; summary?: string };
+  position: {
+    title: string;
+    titleEvidence?: string;
+    employmentType?: string;
+    employmentTypeEvidence?: string;
+    contractTerm?: string;
+    contractTermEvidence?: string;
+    probation?: string;
+    background?: string;
+  };
   job: { description?: string; responsibilities: string[]; notes?: string };
   requirements: { title: "求める経験・スキル"; must: string[]; want: string[] };
   work: {
     location?: string;
+    locationEvidence?: string;
     hours?: string;
     breakTime?: string;
     holidays?: string;
@@ -149,6 +165,7 @@ export type JobPosting = {
   };
   salary: {
     summary: string;
+    summaryEvidence?: string;
     details: string[];
     fixedOvertime?: { amount: string; includedHours: string; excessPayment: string; notes?: string };
   };

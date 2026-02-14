@@ -26,7 +26,7 @@ const normalize = (s: string): string => {
 // faithfulnessCheck
 // ---------------------------------------------------------------------------
 
-/** 検証除外パス（メタデータ系は原文に存在しなくて当然） */
+/** 検証除外パス（メタデータ系・evidence系は原文に存在しなくて当然） */
 const EXCLUDED_PREFIXES = [
   "schemaVersion",
   "source.",
@@ -34,6 +34,13 @@ const EXCLUDED_PREFIXES = [
   "requirements.title",  // 固定値 "求める経験・スキル"
   "position.background",
   "company.summary",
+  // evidence フィールドは検証用メタデータなので faithfulness チェック対象外
+  "company.nameEvidence",
+  "position.titleEvidence",
+  "position.employmentTypeEvidence",
+  "position.contractTermEvidence",
+  "work.locationEvidence",
+  "salary.summaryEvidence",
 ];
 
 const isExcluded = (path: string): boolean => {

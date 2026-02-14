@@ -19,6 +19,90 @@ const log = (tag: string, msg: string, data?: Record<string, unknown>) => {
   console.log(`[${tag}] ${msg}`, data ?? "");
 };
 
+// ---------------------------------------------------------------------------
+// evidence 検証: rawText 内に evidence が含まれていなければ項目を無効化
+// ---------------------------------------------------------------------------
+const normalizeForEvidence = (s: string): string =>
+  s.replace(/[\r\n\t\u3000]/g, " ").replace(/\s+/g, " ").trim();
+
+type EvidenceSpec = {
+  fieldLabel: string;
+  evidence: string | undefined;
+  getValue: () => string;
+  clearValue: () => void;
+};
+
+const validateEvidence = (
+  job: JobPosting,
+  normalizedText: string
+): { warnings: string[] } => {
+  const warnings: string[] = [];
+  const rawNorm = normalizeForEvidence(normalizedText);
+
+  const specs: EvidenceSpec[] = [
+    {
+      fieldLabel: "company.name",
+      evidence: job.company.nameEvidence,
+      getValue: () => job.company.name,
+      clearValue: () => { job.company.name = ""; },
+    },
+    {
+      fieldLabel: "position.title",
+      evidence: job.position.titleEvidence,
+      getValue: () => job.position.title,
+      clearValue: () => { job.position.title = ""; },
+    },
+    {
+      fieldLabel: "position.employmentType",
+      evidence: job.position.employmentTypeEvidence,
+      getValue: () => job.position.employmentType ?? "",
+      clearValue: () => { job.position.employmentType = ""; },
+    },
+    {
+      fieldLabel: "position.contractTerm",
+      evidence: job.position.contractTermEvidence,
+      getValue: () => job.position.contractTerm ?? "",
+      clearValue: () => { job.position.contractTerm = ""; },
+    },
+    {
+      fieldLabel: "work.location",
+      evidence: job.work.locationEvidence,
+      getValue: () => job.work.location ?? "",
+      clearValue: () => { job.work.location = ""; },
+    },
+    {
+      fieldLabel: "salary.summary",
+      evidence: job.salary.summaryEvidence,
+      getValue: () => job.salary.summary,
+      clearValue: () => { job.salary.summary = ""; },
+    },
+  ];
+
+  for (const spec of specs) {
+    const value = spec.getValue();
+    if (!value.trim()) continue; // 値が空ならチェック不要
+
+    const ev = (spec.evidence ?? "").trim();
+    if (!ev) {
+      // evidence 未提供なのに値がある → 信頼できない
+      log("evidence", `EVIDENCE_MISSING: ${spec.fieldLabel} (no evidence provided)`);
+      warnings.push(`EVIDENCE_MISSING: ${spec.fieldLabel}`);
+      spec.clearValue();
+      continue;
+    }
+
+    const evNorm = normalizeForEvidence(ev);
+    if (!rawNorm.includes(evNorm)) {
+      // evidence が rawText に存在しない → ハルシネーションの疑い
+      log("evidence", `EVIDENCE_MISSING: ${spec.fieldLabel} (evidence not found in rawText)`, { evidence: ev });
+      warnings.push(`EVIDENCE_MISSING: ${spec.fieldLabel}`);
+      spec.clearValue();
+    }
+  }
+
+  return { warnings };
+};
+
 const DATA_DIR = path.resolve(process.cwd(), "data");
 const MIN_EXTRACTED_CHARS = Number(process.env.MIN_EXTRACTED_CHARS || 300);
 
@@ -348,6 +432,10 @@ app.post("/api/structure", async (req, res) => {
       new Set([...sanitized.compliance.forbiddenDetected, ...forbiddenDetected])
     );
 
+    // (2.5) evidence 検証: rawText 内に根拠が無い項目を無効化
+    const evidenceResult = validateEvidence(sanitized, normalizedText);
+    const warnings: string[] = [...evidenceResult.warnings];
+
     // (3) 空の求人票ガード
     if (!sanitized.company?.name?.trim()) {
       return res.status(400).json({
@@ -365,7 +453,7 @@ app.post("/api/structure", async (req, res) => {
       delete sanitized.work.overtime;
     }
 
-    // (4) 必須欠落チェック（停止条件）
+    // (4) 必須欠落チェック（停止条件）— evidence 無効化後に実行
     const reqResult = requiredFieldsCheck(sanitized);
     if (!reqResult.ok) {
       return res.status(400).json({
@@ -373,6 +461,7 @@ app.post("/api/structure", async (req, res) => {
           code: "REQUIRED_FIELD_MISSING",
           message: "必須項目が取得できません",
           missing: reqResult.missingKeys,
+          warnings,
         },
       });
     }
@@ -380,7 +469,6 @@ app.post("/api/structure", async (req, res) => {
     // (5) faithfulness チェック
     const faithResult = faithfulnessCheck(sanitized, normalizedText);
     const faithErrors = toFaithfulnessErrors(faithResult);
-    const warnings: string[] = [];
 
     if (!faithResult.ok) {
       warnings.push("FAITHFULNESS_VIOLATIONS_DETECTED");
@@ -747,6 +835,10 @@ app.post("/api/generate", async (req, res) => {
       new Set([...sanitized.compliance.forbiddenDetected, ...forbiddenDetected])
     );
 
+    // evidence 検証: rawText 内に根拠が無い項目を無効化
+    const evidenceResult = validateEvidence(sanitized, normalized);
+    const warnings: string[] = [...evidenceResult.warnings];
+
     if (!sanitized.company?.name?.trim()) {
       return res.status(400).json({
         error: { code: "JOB_JSON_EMPTY_OR_INVALID", message: "構造化結果に企業名がありません。" },
@@ -762,7 +854,7 @@ app.post("/api/generate", async (req, res) => {
       delete sanitized.work.overtime;
     }
 
-    // 必須欠落チェック
+    // 必須欠落チェック — evidence 無効化後に実行
     const reqResult = requiredFieldsCheck(sanitized);
     if (!reqResult.ok) {
       return res.status(400).json({
@@ -770,6 +862,7 @@ app.post("/api/generate", async (req, res) => {
           code: "REQUIRED_FIELD_MISSING",
           message: "必須項目が取得できません",
           missing: reqResult.missingKeys,
+          warnings,
         },
       });
     }
@@ -777,7 +870,6 @@ app.post("/api/generate", async (req, res) => {
     // faithfulness チェック
     const faithResult = faithfulnessCheck(sanitized, normalized);
     const faithErrors = toFaithfulnessErrors(faithResult);
-    const warnings: string[] = [];
 
     if (!faithResult.ok) {
       warnings.push("FAITHFULNESS_VIOLATIONS_DETECTED");
@@ -881,5 +973,5 @@ app.post("/api/generate", async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Museum JobTool Ver 0.3 — Server listening on port ${port}`);
+  console.log(`Museum JobTool Ver 0.3.1 — Server listening on port ${port}`);
 });

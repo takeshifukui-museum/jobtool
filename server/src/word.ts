@@ -20,7 +20,7 @@ import {
   WidthType
 } from "docx";
 import { JobPosting } from "./schema.js";
-import { listToText, formatPostalCode, formatReadability } from "./extract.js";
+import { listToText, formatPostalCode, formatReadability, formatBullets } from "./extract.js";
 
 const keepLabels = ["賃金", "業務内容", "求める経験・スキル"];
 
@@ -57,6 +57,37 @@ const removeEmptyRows = (docxBuffer: Buffer): Buffer => {
   const updatedXml = documentXml.replace(/<w:tr[\s\S]*?<\/w:tr>/g, () => cleanedRows.shift() ?? "");
   zip.file("word/document.xml", updatedXml);
   return zip.generate({ type: "nodebuffer" });
+};
+
+// ---------------------------------------------------------------------------
+// テンプレモード: タイトルブロックを先頭に挿入（XML操作）
+// テンプレートに {company.name} 等が無い場合でもタイトルが必ず表示される
+// ---------------------------------------------------------------------------
+const escapeXml = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const prependTitleBlock = (docxBuffer: Buffer, companyName: string, positionTitle: string): Buffer => {
+  try {
+    const zip = new PizZip(docxBuffer);
+    const xml = zip.file("word/document.xml")?.asText();
+    if (!xml) return docxBuffer;
+
+    // 既にタイトルが含まれている場合はスキップ（二重挿入防止）
+    if (xml.includes(">求人票<")) return docxBuffer;
+
+    const titleParas = [
+      `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="48"/><w:rFonts w:ascii="${BIZ_UDP_GOTHIC}" w:eastAsia="${BIZ_UDP_GOTHIC}"/></w:rPr><w:t>求人票</w:t></w:r></w:p>`,
+      `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:sz w:val="28"/><w:rFonts w:ascii="${BIZ_UDP_GOTHIC}" w:eastAsia="${BIZ_UDP_GOTHIC}"/></w:rPr><w:t>${escapeXml(companyName)}</w:t></w:r></w:p>`,
+      `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:sz w:val="28"/><w:rFonts w:ascii="${BIZ_UDP_GOTHIC}" w:eastAsia="${BIZ_UDP_GOTHIC}"/></w:rPr><w:t>${escapeXml(positionTitle)}</w:t></w:r></w:p>`,
+      `<w:p/>`,
+    ].join("");
+
+    const updated = xml.replace(/<w:body>/, `<w:body>${titleParas}`);
+    zip.file("word/document.xml", updated);
+    return zip.generate({ type: "nodebuffer" });
+  } catch {
+    return docxBuffer; // XML操作失敗時はそのまま返す
+  }
 };
 
 const isTemplateLikelyBlank = (template: Buffer): boolean => {
@@ -184,9 +215,23 @@ const joinSkillBlock = (must: string[], want: string[]): string => {
   const mustText = listToText(must);
   const wantText = listToText(want);
   const parts: string[] = [];
-  if (mustText) parts.push("【必須】\n" + mustText);
-  if (wantText) parts.push("【歓迎】\n" + wantText);
+  if (mustText) parts.push("【必須】\n" + formatBullets(mustText));
+  if (wantText) parts.push("【歓迎】\n" + formatBullets(wantText));
   return parts.join("\n\n");
+};
+
+// ---------------------------------------------------------------------------
+// 賃金詳細の重複排除: summary に details 内容が含まれていたら details を省略
+// ---------------------------------------------------------------------------
+const isSalaryDetailsRedundant = (summary: string, details: string[]): boolean => {
+  if (!details || details.length === 0) return true;
+  const normSummary = summary.replace(/[\s\u3000・\-−–—,、。．]/g, "");
+  if (!normSummary) return false;
+  // details の全行が summary に含まれていれば冗長
+  return details.every((d) => {
+    const normD = d.replace(/[\s\u3000・\-−–—,、。．]/g, "");
+    return !normD || normSummary.includes(normD);
+  });
 };
 
 const buildJobBlock = (job: JobPosting["job"]): string => {
@@ -237,10 +282,25 @@ const renderJobDocxFromScratch = async (
   const foExcess = showFO ? (fo.excessPayment ?? "").trim() : "";
 
   // -----------------------------------------------------------------------
+  // 固定残業代: 全フィールド空なら3行とも非表示
+  // -----------------------------------------------------------------------
+  const foAllEmpty = !foAmount && !foHours && !foExcess;
+
+  // -----------------------------------------------------------------------
+  // 賃金: details が summary の繰り返しなら省略
+  // -----------------------------------------------------------------------
+  const salSummary = applyRenderFormatting(job.salary.summary);
+  const salDetails = job.salary.details?.filter((x) => x.trim()) ?? [];
+  const salDetailsText = isSalaryDetailsRedundant(job.salary.summary, salDetails)
+    ? ""
+    : applyRenderFormatting(listToText(salDetails));
+  const salaryValue = [salSummary, salDetailsText].filter(Boolean).join("\n");
+
+  // -----------------------------------------------------------------------
   // 行データ構築（Canonical Key使用、空欄非表示）
   // -----------------------------------------------------------------------
   const rowData: Record<string, string> = {
-    "業務内容": applyRenderFormatting(buildJobBlock(job.job)),
+    "業務内容": applyRenderFormatting(formatBullets(buildJobBlock(job.job))),
     "求める経験・スキル": applyRenderFormatting(joinSkillBlock(job.requirements.must, job.requirements.want)),
     "雇用形態": job.position.employmentType ?? "",
     "契約期間": job.position.contractTerm ?? "",
@@ -250,10 +310,10 @@ const renderJobDocxFromScratch = async (
     "休憩時間": job.work.breakTime ?? "",
     "休日休暇": applyRenderFormatting(job.work.holidays ?? ""),
     "時間外労働": overtimeText,
-    "賃金": [applyRenderFormatting(job.salary.summary), applyRenderFormatting(listToText(job.salary.details))].filter(Boolean).join("\n"),
-    "固定残業代（金額）": foAmount,
-    "固定残業代（時間数）": foHours,
-    "超過分の扱い": foExcess,
+    "賃金": salaryValue,
+    "固定残業代（金額）": foAllEmpty ? "" : foAmount,
+    "固定残業代（時間数）": foAllEmpty ? "" : foHours,
+    "超過分の扱い": foAllEmpty ? "" : foExcess,
     "社会保険": job.insurance.socialInsurance ?? "",
     "福利厚生": applyRenderFormatting(listToText(job.benefits.items)),
     "選考プロセス": job.selection.process ?? ""
@@ -261,12 +321,16 @@ const renderJobDocxFromScratch = async (
 
   // 固定順序で行を構築。空の行は出さない（valueが空 → 行を出さない）
   // ただし「賃金」は必須項目のため常に表示
+  // 同一ラベルの複数回出力を防止（最初の1回のみ採用）
   const REQUIRED_LABELS = ["賃金"];
   const rows: Array<[string, string]> = [];
+  const usedLabels = new Set<string>();
   for (const label of FIXED_ROW_ORDER) {
+    if (usedLabels.has(label)) continue;
     const value = (rowData[label] ?? "").trim();
     if (!value && !REQUIRED_LABELS.includes(label)) continue;
     rows.push([label, value]);
+    usedLabels.add(label);
   }
 
   if (rows.length === 0) {
@@ -431,7 +495,9 @@ export const renderJobDocx = async (
     throw new Error(`Word差し込みに失敗しました: ${msg}`);
   }
   const rendered = doc.getZip().generate({ type: "nodebuffer" });
-  return removeEmptyRows(rendered);
+  const withEmptyRowsRemoved = removeEmptyRows(rendered);
+  // テンプレモードでもタイトル・企業名・ポジション名を必ず先頭に表示
+  return prependTitleBlock(withEmptyRowsRemoved, job.company.name, job.position.title || (opts?.jobTitle ?? ""));
 };
 
 const TEMPLATE_NAME = "museum_template.docx";
