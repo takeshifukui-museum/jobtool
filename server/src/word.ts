@@ -110,7 +110,6 @@ const FIXED_ROW_ORDER = [
   "休日休暇",
   "時間外労働",
   "賃金",
-  "賃金詳細",
   "固定残業代（金額）",
   "固定残業代（時間数）",
   "超過分の扱い",
@@ -232,7 +231,7 @@ const renderJobDocxFromScratch = async (
   // 未取得項目は出さない ただし表示可能部分は表示する
   // -----------------------------------------------------------------------
   const fo = job.salary.fixedOvertime;
-  const showFO = opts?.showFixedOvertime !== false && fo;
+  const showFO = opts?.showFixedOvertime === true && fo;
   const foAmount = showFO ? (fo.amount ?? "").trim() : "";
   const foHours = showFO ? (fo.includedHours ?? "").trim() : "";
   const foExcess = showFO ? (fo.excessPayment ?? "").trim() : "";
@@ -251,8 +250,7 @@ const renderJobDocxFromScratch = async (
     "休憩時間": job.work.breakTime ?? "",
     "休日休暇": applyRenderFormatting(job.work.holidays ?? ""),
     "時間外労働": overtimeText,
-    "賃金": applyRenderFormatting(job.salary.summary),
-    "賃金詳細": applyRenderFormatting(listToText(job.salary.details)),
+    "賃金": [applyRenderFormatting(job.salary.summary), applyRenderFormatting(listToText(job.salary.details))].filter(Boolean).join("\n"),
     "固定残業代（金額）": foAmount,
     "固定残業代（時間数）": foHours,
     "超過分の扱い": foExcess,
@@ -262,10 +260,12 @@ const renderJobDocxFromScratch = async (
   };
 
   // 固定順序で行を構築。空の行は出さない（valueが空 → 行を出さない）
+  // ただし「賃金」は必須項目のため常に表示
+  const REQUIRED_LABELS = ["賃金"];
   const rows: Array<[string, string]> = [];
   for (const label of FIXED_ROW_ORDER) {
     const value = (rowData[label] ?? "").trim();
-    if (!value) continue; // 空欄項目は出さない
+    if (!value && !REQUIRED_LABELS.includes(label)) continue;
     rows.push([label, value]);
   }
 
