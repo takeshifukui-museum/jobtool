@@ -12,10 +12,18 @@ import { JobPosting } from "./schema.js";
 import {
   faithfulnessCheck,
   requiredFieldsCheck,
+  optionalFieldWarnings,
   toFaithfulnessErrors,
   type RequiredFieldsResult,
 } from "./validate.js";
-import { normalizeCompanyName, mergeCompanyStatic } from "./company.js";
+import {
+  normalizeCompanyName,
+  resolveCompanyKey,
+  mergeCompanyStatic,
+  type Provenance,
+} from "./company.js";
+
+const ENABLE_COMPANY_STATIC = process.env.ENABLE_COMPANY_STATIC === "true" || process.env.ENABLE_COMPANY_STATIC === "1";
 
 const log = (tag: string, msg: string, data?: Record<string, unknown>) => {
   console.log(`[${tag}] ${msg}`, data ?? "");
@@ -289,12 +297,7 @@ const resolveRunDir = (runId: string): string | null => {
 // ---------------------------------------------------------------------------
 const buildWarnings = (job: JobPosting): string[] => {
   const w: string[] = [];
-  if (!job.insurance.socialInsurance?.trim()) {
-    w.push("SOCIAL_INSURANCE_MISSING: 社会保険の情報が取得できませんでした。原文をご確認ください。");
-  }
-  if (!job.benefits.items || job.benefits.items.filter((x) => x.trim()).length === 0) {
-    w.push("BENEFITS_MISSING: 福利厚生の情報が取得できませんでした。");
-  }
+  // 社会保険・福利厚生は optionalFieldWarnings で処理するため、ここでは時間外労働のみ
   if (!job.work.overtime || (!job.work.overtime.details?.trim() && job.work.overtime.exists === false)) {
     w.push("OVERTIME_MISSING: 時間外労働の情報が取得できませんでした。");
   }
@@ -559,14 +562,18 @@ app.post("/api/structure", async (req, res) => {
     const evidenceResult = validateEvidence(sanitized, normalizedText);
     const warnings: string[] = [...evidenceResult.warnings];
 
-    // (2.6) 企業名の辞書正規化
+    // (2.6) 企業名の正規化（トリムのみ。ハードコード辞書は廃止済み）
     applyCompanyNameNormalization(sanitized);
 
     // (2.7) 【歓迎】マーカーチェック: 原文に無い歓迎スキルは除去
     stripUnfoundedWant(sanitized, normalizedText, warnings);
 
-    // (2.8) 企業定型ブロックマージ（ENABLE_COMPANY_STATIC=1 のときのみ）
-    mergeCompanyStatic(sanitized);
+    // (2.8) company_key 解決 + 企業定型ブロックマージ
+    const companyKey = resolveCompanyKey(sanitized.company.name);
+    if (companyKey) {
+      log("company", `company_key 解決: "${sanitized.company.name}" → "${companyKey}"`);
+    }
+    const provenance = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
 
     // 時間外労働: 情報が無い場合は項目自体を削除
     if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
@@ -576,7 +583,7 @@ app.post("/api/structure", async (req, res) => {
     // (3) B) 中間成果物を先行保存（バリデーション失敗でも残す）
     saveIntermediateArtifacts(artifactDir, sanitized, normalizedText);
 
-    // (4) 空の求人票ガード
+    // (4) 空の求人票ガード（企業名・ポジション名は停止条件）
     if (!sanitized.company?.name?.trim()) {
       const reqResult = requiredFieldsCheck(sanitized);
       saveMissingRequiredReport(artifactDir, reqResult, warnings, "構造化結果に企業名がありません。ページが求人情報ではない可能性があります。");
@@ -604,7 +611,7 @@ app.post("/api/structure", async (req, res) => {
       });
     }
 
-    // (5) 必須欠落チェック（停止条件）— evidence 無効化後に実行
+    // (5) 真の必須欠落チェック（停止条件）— 業務内容/勤務地/賃金
     const reqResult = requiredFieldsCheck(sanitized);
     if (!reqResult.ok) {
       saveMissingRequiredReport(artifactDir, reqResult, warnings);
@@ -617,6 +624,13 @@ app.post("/api/structure", async (req, res) => {
           warnings,
         },
       });
+    }
+
+    // (5.5) 任意項目の欠落警告（停止しない）
+    const optResult = optionalFieldWarnings(sanitized);
+    if (optResult.warnings.length > 0) {
+      warnings.push(...optResult.warnings);
+      log("structure", "任意項目欠落（停止なし）", { missing: optResult.warnings });
     }
 
     // (6) faithfulness チェック
@@ -681,6 +695,8 @@ app.post("/api/structure", async (req, res) => {
       faithViolations: faithErrors.length > 0 ? faithErrors : undefined,
       showFixedOvertime,
       companyName: sanitized.company.name,
+      companyKey: companyKey ?? undefined,
+      provenance: Object.keys(provenance).length > 0 ? provenance : undefined,
       positionTitle: sanitized.position.title,
       jobTitle,
       structuredAt: new Date().toISOString(),
@@ -992,14 +1008,18 @@ app.post("/api/generate", async (req, res) => {
     const evidenceResult = validateEvidence(sanitized, normalized);
     const warnings: string[] = [...evidenceResult.warnings];
 
-    // 企業名の辞書正規化
+    // 企業名の正規化（トリムのみ）
     applyCompanyNameNormalization(sanitized);
 
     // 【歓迎】マーカーチェック
     stripUnfoundedWant(sanitized, normalized, warnings);
 
-    // 企業定型ブロックマージ
-    mergeCompanyStatic(sanitized);
+    // company_key 解決 + 企業定型ブロックマージ
+    const companyKey = resolveCompanyKey(sanitized.company.name);
+    if (companyKey) {
+      log("company", `company_key 解決: "${sanitized.company.name}" → "${companyKey}"`);
+    }
+    const provenance = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
 
     if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
       delete sanitized.work.overtime;
@@ -1059,7 +1079,7 @@ app.post("/api/generate", async (req, res) => {
       });
     }
 
-    // 必須欠落チェック — evidence 無効化後に実行
+    // 真の必須欠落チェック — 業務内容/勤務地/賃金のみ停止
     const reqResult = requiredFieldsCheck(sanitized);
     if (!reqResult.ok) {
       saveMissingRequiredReport(artifactDir, reqResult, warnings);
@@ -1072,6 +1092,13 @@ app.post("/api/generate", async (req, res) => {
           warnings,
         },
       });
+    }
+
+    // 任意項目の欠落警告（停止しない）
+    const optResult = optionalFieldWarnings(sanitized);
+    if (optResult.warnings.length > 0) {
+      warnings.push(...optResult.warnings);
+      log("generate", "任意項目欠落（停止なし）", { missing: optResult.warnings });
     }
 
     // faithfulness チェック
@@ -1114,6 +1141,8 @@ app.post("/api/generate", async (req, res) => {
       siteHint: siteHint || undefined,
       extractedLength,
       companyName: sanitized.company.name,
+      companyKey: companyKey ?? undefined,
+      provenance: Object.keys(provenance).length > 0 ? provenance : undefined,
       positionTitle: sanitized.position.title,
       savedAt: new Date().toISOString(),
     };
@@ -1158,5 +1187,5 @@ app.post("/api/generate", async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Museum JobTool Ver 0.3.3 — Server listening on port ${port}`);
+  console.log(`Museum JobTool Ver 0.3.4 — Server listening on port ${port}`);
 });

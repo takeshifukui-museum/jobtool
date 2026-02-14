@@ -1,13 +1,17 @@
 /**
- * validate.ts — Ver 0.3 バリデーション
+ * validate.ts — Ver 0.3.4 バリデーション
  *
  * 1) faithfulnessCheck — job.json の各 value が job_raw.md に部分一致で存在するか検証
  *    許可: 改行→スペース、連続空白→1個、全角スペース→半角スペース、前後トリム
  *    禁止: 言い換え・要約・再構成
  *
- * 2) requiredFieldsCheck — 必須5項目の欠落チェック
- *    業務内容 / 就業場所 / 就業時間 / 休日休暇 / 賃金
+ * 2) requiredFieldsCheck — 真の必須項目の欠落チェック（停止条件）
+ *    業務内容 / 勤務地 / 賃金
  *    欠落時は Word 生成停止
+ *
+ * 3) optionalFieldWarnings — 任意項目の欠落警告（停止しない）
+ *    就業時間 / 休日休暇 / 福利厚生 / 社会保険 / 選考プロセス
+ *    欠落でも出力自体は続行（空欄は非表示）
  */
 
 import { JobPosting } from "./schema.js";
@@ -125,9 +129,14 @@ export type RequiredFieldsResult = {
 };
 
 /**
- * 必須5項目の欠落チェック。
- * 社会保険は必須停止にしない（警告のみ — index.ts 側で処理）。
- * 正規化後のフィールドに対して判定する。
+ * 真の必須項目（停止条件）の欠落チェック。
+ * 欠落時は Word 生成を停止する。
+ *
+ * 真の必須: 業務内容 / 勤務地 / 賃金
+ * （企業名・ポジション名は index.ts 側で別途チェック済み）
+ *
+ * 就業時間・休日休暇・福利厚生・社会保険・選考プロセスは
+ * 停止条件にしない（optionalFieldWarnings で警告のみ）。
  */
 export const requiredFieldsCheck = (job: JobPosting): RequiredFieldsResult => {
   const getPreview = (v: unknown): string => {
@@ -138,9 +147,7 @@ export const requiredFieldsCheck = (job: JobPosting): RequiredFieldsResult => {
   const responsibilities = (job.job.responsibilities ?? []).filter((x) => x.trim());
   const checks: Array<{ key: string; jsonPath: string; present: boolean; value: unknown }> = [
     { key: "業務内容",   jsonPath: "job.responsibilities[]", present: responsibilities.length > 0, value: responsibilities },
-    { key: "就業場所",   jsonPath: "work.location",          present: Boolean(job.work.location?.trim()), value: job.work.location },
-    { key: "就業時間",   jsonPath: "work.hours",             present: Boolean(job.work.hours?.trim()), value: job.work.hours },
-    { key: "休日休暇",   jsonPath: "work.holidays",          present: Boolean(job.work.holidays?.trim()), value: job.work.holidays },
+    { key: "勤務地",     jsonPath: "work.location",          present: Boolean(job.work.location?.trim()), value: job.work.location },
     { key: "賃金",       jsonPath: "salary.summary",         present: Boolean(job.salary.summary?.trim()), value: job.salary.summary },
   ];
 
@@ -153,6 +160,47 @@ export const requiredFieldsCheck = (job: JobPosting): RequiredFieldsResult => {
 
   const missingKeys = checks.filter((c) => !c.present).map((c) => c.key);
   return { ok: missingKeys.length === 0, missingKeys, details };
+};
+
+// ---------------------------------------------------------------------------
+// optionalFieldWarnings — 任意項目の欠落警告（停止しない）
+// ---------------------------------------------------------------------------
+
+export type OptionalFieldWarning = {
+  key: string;
+  jsonPath: string;
+  present: boolean;
+};
+
+export type OptionalFieldsResult = {
+  warnings: string[];
+  details: OptionalFieldWarning[];
+};
+
+/**
+ * 任意項目の欠落を警告形式で返す。停止はしない。
+ * 空欄項目は Word 側で非表示にする。
+ */
+export const optionalFieldWarnings = (job: JobPosting): OptionalFieldsResult => {
+  const checks: Array<{ key: string; jsonPath: string; present: boolean }> = [
+    { key: "就業時間",     jsonPath: "work.hours",             present: Boolean(job.work.hours?.trim()) },
+    { key: "休日休暇",     jsonPath: "work.holidays",          present: Boolean(job.work.holidays?.trim()) },
+    { key: "福利厚生",     jsonPath: "benefits.items[]",       present: (job.benefits.items ?? []).filter((x) => x.trim()).length > 0 },
+    { key: "社会保険",     jsonPath: "insurance.socialInsurance", present: Boolean(job.insurance.socialInsurance?.trim()) },
+    { key: "選考プロセス", jsonPath: "selection.process",       present: Boolean(job.selection.process?.trim()) },
+  ];
+
+  const details: OptionalFieldWarning[] = checks.map((c) => ({
+    key: c.key,
+    jsonPath: c.jsonPath,
+    present: c.present,
+  }));
+
+  const warnings = checks
+    .filter((c) => !c.present)
+    .map((c) => `OPTIONAL_MISSING: ${c.key} (${c.jsonPath})`);
+
+  return { warnings, details };
 };
 
 // ---------------------------------------------------------------------------

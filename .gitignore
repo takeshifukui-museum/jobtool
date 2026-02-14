@@ -1,6 +1,10 @@
 .cursor/mcp.json
 *.env
-server/data/
+server/data/*
+!server/data/company_alias.json
+!server/data/company_static/
+server/data/company_static/*
+!server/data/company_static/.gitkeep
 *.docx
 *.log
 node_modules/
