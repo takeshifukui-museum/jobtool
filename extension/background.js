@@ -6,13 +6,9 @@ const API_RENDER   = `${API_BASE}/api/render`;
 // 互換: 旧 /api/generate（extract+structure を1回で行う）
 const API_GENERATE = `${API_BASE}/api/generate`;
 
-// R1: data:URL 禁止 — Blob URL に統一（権限エラー回避）
-const base64ToBlobUrl = (base64, contentType) => {
-  const bin = atob(base64);
-  const buf = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-  const blob = new Blob([buf], { type: contentType });
-  return URL.createObjectURL(blob);
+// R1: Service Worker では URL.createObjectURL が使えないため Data URL を使用
+const base64ToDataUrl = (base64, contentType) => {
+  return `data:${contentType};base64,${base64}`;
 };
 
 const sanitizePathPart = (s) => {
@@ -162,15 +158,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const filename = buildDownloadFilename(folderName, data.suggestedFilename || suggestedFilename);
         const contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-        const blobUrl = base64ToBlobUrl(data.docx, contentType);
+        const dataUrl = base64ToDataUrl(data.docx, contentType);
 
         // R5: callback 形式で downloads.download を呼ぶ（MV3安定性）
         chrome.downloads.download(
-          { url: blobUrl, filename, saveAs: true },
+          { url: dataUrl, filename, saveAs: true },
           (downloadId) => {
-            // R4: Blob URL を遅延 revoke
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-
             // R3: lastError を必ず確認
             if (chrome.runtime.lastError) {
               const err = chrome.runtime.lastError.message || "unknown download error";
