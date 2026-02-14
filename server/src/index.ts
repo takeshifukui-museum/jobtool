@@ -13,6 +13,7 @@ import {
   faithfulnessCheck,
   requiredFieldsCheck,
   toFaithfulnessErrors,
+  type RequiredFieldsResult,
 } from "./validate.js";
 import { normalizeCompanyName, mergeCompanyStatic } from "./company.js";
 
@@ -129,6 +130,92 @@ const stripUnfoundedWant = (job: JobPosting, rawText: string, warnings: string[]
     log("want-check", "原文に歓迎マーカーが無いため want を除去", { wantCount: job.requirements.want.length });
     warnings.push("WANT_REMOVED_NO_MARKER");
     job.requirements.want = [];
+  }
+};
+
+// ---------------------------------------------------------------------------
+// D) 必須不足レポート保存 + ログ出力
+// ---------------------------------------------------------------------------
+type MissingRequiredReport = {
+  code: string;
+  message: string;
+  missingKeys: string[];
+  details: RequiredFieldsResult["details"];
+  evidenceWarnings: string[];
+  timestamp: string;
+  artifactDir: string;
+};
+
+const saveMissingRequiredReport = (
+  dir: string,
+  reqResult: RequiredFieldsResult,
+  evidenceWarnings: string[],
+  extraMessage?: string
+): MissingRequiredReport => {
+  const report: MissingRequiredReport = {
+    code: "REQUIRED_FIELD_MISSING",
+    message: extraMessage ?? "必須項目が取得できません",
+    missingKeys: reqResult.missingKeys,
+    details: reqResult.details,
+    evidenceWarnings,
+    timestamp: new Date().toISOString(),
+    artifactDir: dir,
+  };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "missing_required.json"),
+      JSON.stringify(report, null, 2),
+      "utf8"
+    );
+  } catch (e) {
+    console.error("[missing_required] 保存失敗:", e);
+  }
+
+  // D) コンソールログ: ユーザーがコピペ可能な形式
+  console.error([
+    "========================================",
+    "FAILED: missing required",
+    `missing_required: ${JSON.stringify(reqResult.missingKeys)}`,
+    `details: ${JSON.stringify(reqResult.details, null, 2)}`,
+    `evidence_warnings: ${JSON.stringify(evidenceWarnings)}`,
+    `report: ${path.join(dir, "missing_required.json")}`,
+    "========================================",
+  ].join("\n"));
+
+  return report;
+};
+
+/**
+ * B) 中間成果物の早期保存（バリデーション前に呼ぶ）
+ */
+const saveIntermediateArtifacts = (
+  dir: string,
+  sanitized: JobPosting,
+  normalizedText: string,
+  rawHtml?: string,
+): void => {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    // job.json
+    fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify(sanitized, null, 2), "utf8");
+    // job_structured.md
+    const md = buildStructuredMarkdown(sanitized, normalizedText);
+    fs.writeFileSync(path.join(dir, "job_structured.md"), md, "utf8");
+    // job_raw.md（まだ無い場合のみ）
+    const rawMdPath = path.join(dir, "job_raw.md");
+    if (!fs.existsSync(rawMdPath)) {
+      fs.writeFileSync(rawMdPath, normalizedText, "utf8");
+    }
+    // rawHtml
+    if (rawHtml && typeof rawHtml === "string") {
+      const htmlPath = path.join(dir, "job_raw.html");
+      if (!fs.existsSync(htmlPath)) {
+        fs.writeFileSync(htmlPath, rawHtml, "utf8");
+      }
+    }
+  } catch (e) {
+    console.error("[intermediate] 中間成果物保存失敗:", e);
   }
 };
 
@@ -481,37 +568,58 @@ app.post("/api/structure", async (req, res) => {
     // (2.8) 企業定型ブロックマージ（ENABLE_COMPANY_STATIC=1 のときのみ）
     mergeCompanyStatic(sanitized);
 
-    // (3) 空の求人票ガード
-    if (!sanitized.company?.name?.trim()) {
-      return res.status(400).json({
-        error: { code: "JOB_JSON_EMPTY_OR_INVALID", message: "構造化結果に企業名がありません。ページが求人情報ではない可能性があります。" },
-      });
-    }
-    if (!sanitized.position?.title?.trim()) {
-      return res.status(400).json({
-        error: { code: "JOB_JSON_EMPTY_OR_INVALID", message: "構造化結果にポジション名がありません。" },
-      });
-    }
-
     // 時間外労働: 情報が無い場合は項目自体を削除
     if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
       delete sanitized.work.overtime;
     }
 
-    // (4) 必須欠落チェック（停止条件）— evidence 無効化後に実行
-    const reqResult = requiredFieldsCheck(sanitized);
-    if (!reqResult.ok) {
+    // (3) B) 中間成果物を先行保存（バリデーション失敗でも残す）
+    saveIntermediateArtifacts(artifactDir, sanitized, normalizedText);
+
+    // (4) 空の求人票ガード
+    if (!sanitized.company?.name?.trim()) {
+      const reqResult = requiredFieldsCheck(sanitized);
+      saveMissingRequiredReport(artifactDir, reqResult, warnings, "構造化結果に企業名がありません。ページが求人情報ではない可能性があります。");
       return res.status(400).json({
         error: {
-          code: "REQUIRED_FIELD_MISSING",
-          message: "必須項目が取得できません",
-          missing: reqResult.missingKeys,
+          code: "JOB_JSON_EMPTY_OR_INVALID",
+          message: "構造化結果に企業名がありません。ページが求人情報ではない可能性があります。",
+          missing: ["company.name", ...reqResult.missingKeys],
+          details: reqResult.details,
+          warnings,
+        },
+      });
+    }
+    if (!sanitized.position?.title?.trim()) {
+      const reqResult = requiredFieldsCheck(sanitized);
+      saveMissingRequiredReport(artifactDir, reqResult, warnings, "構造化結果にポジション名がありません。");
+      return res.status(400).json({
+        error: {
+          code: "JOB_JSON_EMPTY_OR_INVALID",
+          message: "構造化結果にポジション名がありません。",
+          missing: ["position.title", ...reqResult.missingKeys],
+          details: reqResult.details,
           warnings,
         },
       });
     }
 
-    // (5) faithfulness チェック
+    // (5) 必須欠落チェック（停止条件）— evidence 無効化後に実行
+    const reqResult = requiredFieldsCheck(sanitized);
+    if (!reqResult.ok) {
+      saveMissingRequiredReport(artifactDir, reqResult, warnings);
+      return res.status(400).json({
+        error: {
+          code: "REQUIRED_FIELD_MISSING",
+          message: `必須項目が取得できません: ${reqResult.missingKeys.join(", ")}`,
+          missing: reqResult.missingKeys,
+          details: reqResult.details,
+          warnings,
+        },
+      });
+    }
+
+    // (6) faithfulness チェック
     const faithResult = faithfulnessCheck(sanitized, normalizedText);
     const faithErrors = toFaithfulnessErrors(faithResult);
 
@@ -893,29 +1001,74 @@ app.post("/api/generate", async (req, res) => {
     // 企業定型ブロックマージ
     mergeCompanyStatic(sanitized);
 
+    if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
+      delete sanitized.work.overtime;
+    }
+
+    // --- B) 中間成果物を先行保存（バリデーション失敗でも必ず残す）---
+    const hash = makeHash(String(url ?? "") + normalized.slice(0, 200));
+    const companyPart = sanitizePathSegment(sanitized.company.name || "unknown");
+    const positionPart = sanitizePathSegment(sanitized.position.title || "unknown");
+    const artifactDir = path.join(DATA_DIR, dateStr(), `${companyPart}_${positionPart}_${hash}`);
+    ensureDir(artifactDir);
+
+    if (rawHtml && typeof rawHtml === "string") {
+      fs.writeFileSync(path.join(artifactDir, "job_raw.html"), rawHtml, "utf8");
+    }
+    fs.writeFileSync(path.join(artifactDir, "job_raw.md"), normalized, "utf8");
+
+    const extractReport = {
+      url: url || null,
+      title: title || null,
+      siteHint: siteHint || null,
+      extractMeta: extractMeta ?? null,
+      extractedLength,
+      minExtractedChars: MIN_EXTRACTED_CHARS,
+      timestamp: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(artifactDir, "extract_report.json"), JSON.stringify(extractReport, null, 2), "utf8");
+
+    // 中間成果物保存（job.json + job_structured.md）
+    saveIntermediateArtifacts(artifactDir, sanitized, normalized, typeof rawHtml === "string" ? rawHtml : undefined);
+
+    // --- バリデーション ---
     if (!sanitized.company?.name?.trim()) {
+      const reqResult = requiredFieldsCheck(sanitized);
+      saveMissingRequiredReport(artifactDir, reqResult, warnings, "構造化結果に企業名がありません。");
       return res.status(400).json({
-        error: { code: "JOB_JSON_EMPTY_OR_INVALID", message: "構造化結果に企業名がありません。" },
+        error: {
+          code: "JOB_JSON_EMPTY_OR_INVALID",
+          message: "構造化結果に企業名がありません。",
+          missing: ["company.name", ...reqResult.missingKeys],
+          details: reqResult.details,
+          warnings,
+        },
       });
     }
     if (!sanitized.position?.title?.trim()) {
+      const reqResult = requiredFieldsCheck(sanitized);
+      saveMissingRequiredReport(artifactDir, reqResult, warnings, "構造化結果にポジション名がありません。");
       return res.status(400).json({
-        error: { code: "JOB_JSON_EMPTY_OR_INVALID", message: "構造化結果にポジション名がありません。" },
+        error: {
+          code: "JOB_JSON_EMPTY_OR_INVALID",
+          message: "構造化結果にポジション名がありません。",
+          missing: ["position.title", ...reqResult.missingKeys],
+          details: reqResult.details,
+          warnings,
+        },
       });
-    }
-
-    if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
-      delete sanitized.work.overtime;
     }
 
     // 必須欠落チェック — evidence 無効化後に実行
     const reqResult = requiredFieldsCheck(sanitized);
     if (!reqResult.ok) {
+      saveMissingRequiredReport(artifactDir, reqResult, warnings);
       return res.status(400).json({
         error: {
           code: "REQUIRED_FIELD_MISSING",
-          message: "必須項目が取得できません",
+          message: `必須項目が取得できません: ${reqResult.missingKeys.join(", ")}`,
           missing: reqResult.missingKeys,
+          details: reqResult.details,
           warnings,
         },
       });
@@ -944,29 +1097,7 @@ app.post("/api/generate", async (req, res) => {
 
     const showFixedOvertime = hasFixedOvertimeKeywords(normalized);
 
-    // --- 保存 ---
-    const hash = makeHash(String(url ?? "") + normalized.slice(0, 200));
-    const companyPart = sanitizePathSegment(sanitized.company.name);
-    const positionPart = sanitizePathSegment(sanitized.position.title);
-    const artifactDir = path.join(DATA_DIR, dateStr(), `${companyPart}_${positionPart}_${hash}`);
-    ensureDir(artifactDir);
-
-    if (rawHtml && typeof rawHtml === "string") {
-      fs.writeFileSync(path.join(artifactDir, "job_raw.html"), rawHtml, "utf8");
-    }
-    fs.writeFileSync(path.join(artifactDir, "job_raw.md"), normalized, "utf8");
-
-    const extractReport = {
-      url: url || null,
-      title: title || null,
-      siteHint: siteHint || null,
-      extractMeta: extractMeta ?? null,
-      extractedLength,
-      minExtractedChars: MIN_EXTRACTED_CHARS,
-      timestamp: new Date().toISOString(),
-    };
-    fs.writeFileSync(path.join(artifactDir, "extract_report.json"), JSON.stringify(extractReport, null, 2), "utf8");
-
+    // --- 最終成果物の上書き保存（バリデーション通過後）---
     const structuredMd = buildStructuredMarkdown(sanitized, normalized);
     fs.writeFileSync(path.join(artifactDir, "job_structured.md"), structuredMd, "utf8");
     fs.writeFileSync(path.join(artifactDir, "job.json"), JSON.stringify(sanitized, null, 2), "utf8");
@@ -1027,5 +1158,5 @@ app.post("/api/generate", async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Museum JobTool Ver 0.3.2 — Server listening on port ${port}`);
+  console.log(`Museum JobTool Ver 0.3.3 — Server listening on port ${port}`);
 });

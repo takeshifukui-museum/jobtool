@@ -111,26 +111,48 @@ export const faithfulnessCheck = (
 // requiredFieldsCheck
 // ---------------------------------------------------------------------------
 
+export type RequiredFieldDetail = {
+  key: string;         // canonical label (e.g., "業務内容")
+  jsonPath: string;    // JSON path (e.g., "job.responsibilities[]")
+  present: boolean;
+  checkedValue: string; // 先頭80文字まで（debug用）
+};
+
 export type RequiredFieldsResult = {
   ok: boolean;
   missingKeys: string[];
+  details: RequiredFieldDetail[];
 };
 
 /**
  * 必須5項目の欠落チェック。
  * 社会保険は必須停止にしない（警告のみ — index.ts 側で処理）。
+ * 正規化後のフィールドに対して判定する。
  */
 export const requiredFieldsCheck = (job: JobPosting): RequiredFieldsResult => {
-  const checks: Array<{ key: string; present: boolean }> = [
-    { key: "業務内容", present: (job.job.responsibilities ?? []).filter((x) => x.trim()).length > 0 },
-    { key: "就業場所", present: Boolean(job.work.location?.trim()) },
-    { key: "就業時間", present: Boolean(job.work.hours?.trim()) },
-    { key: "休日休暇", present: Boolean(job.work.holidays?.trim()) },
-    { key: "賃金",     present: Boolean(job.salary.summary?.trim()) },
+  const getPreview = (v: unknown): string => {
+    const s = typeof v === "string" ? v.trim() : Array.isArray(v) ? v.filter((x) => typeof x === "string" && x.trim()).join(" / ") : "";
+    return s.length > 80 ? s.slice(0, 80) + "…" : s;
+  };
+
+  const responsibilities = (job.job.responsibilities ?? []).filter((x) => x.trim());
+  const checks: Array<{ key: string; jsonPath: string; present: boolean; value: unknown }> = [
+    { key: "業務内容",   jsonPath: "job.responsibilities[]", present: responsibilities.length > 0, value: responsibilities },
+    { key: "就業場所",   jsonPath: "work.location",          present: Boolean(job.work.location?.trim()), value: job.work.location },
+    { key: "就業時間",   jsonPath: "work.hours",             present: Boolean(job.work.hours?.trim()), value: job.work.hours },
+    { key: "休日休暇",   jsonPath: "work.holidays",          present: Boolean(job.work.holidays?.trim()), value: job.work.holidays },
+    { key: "賃金",       jsonPath: "salary.summary",         present: Boolean(job.salary.summary?.trim()), value: job.salary.summary },
   ];
 
+  const details: RequiredFieldDetail[] = checks.map((c) => ({
+    key: c.key,
+    jsonPath: c.jsonPath,
+    present: c.present,
+    checkedValue: getPreview(c.value),
+  }));
+
   const missingKeys = checks.filter((c) => !c.present).map((c) => c.key);
-  return { ok: missingKeys.length === 0, missingKeys };
+  return { ok: missingKeys.length === 0, missingKeys, details };
 };
 
 // ---------------------------------------------------------------------------
