@@ -5,6 +5,7 @@ server/data/*
 !server/data/company_static/
 server/data/company_static/*
 !server/data/company_static/.gitkeep
+!server/data/company_static/*.json
 *.docx
 *.log
 node_modules/

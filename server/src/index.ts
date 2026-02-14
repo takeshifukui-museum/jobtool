@@ -20,7 +20,7 @@ import {
   normalizeCompanyName,
   resolveCompanyKey,
   mergeCompanyStatic,
-  type Provenance,
+  type MergeResult,
 } from "./company.js";
 
 const ENABLE_COMPANY_STATIC = process.env.ENABLE_COMPANY_STATIC === "true" || process.env.ENABLE_COMPANY_STATIC === "1";
@@ -177,7 +177,7 @@ const saveMissingRequiredReport = (
       "utf8"
     );
   } catch (e) {
-    console.error("[missing_required] 保存失敗:", e);
+    console.error(`[missing_required] 保存失敗 (target: ${path.join(dir, "missing_required.json")}):`, e);
   }
 
   // D) コンソールログ: ユーザーがコピペ可能な形式
@@ -223,12 +223,27 @@ const saveIntermediateArtifacts = (
       }
     }
   } catch (e) {
-    console.error("[intermediate] 中間成果物保存失敗:", e);
+    console.error(`[intermediate] 中間成果物保存失敗 (target: ${dir}):`, e);
   }
 };
 
 const DATA_DIR = path.resolve(process.cwd(), "data");
 const MIN_EXTRACTED_CHARS = Number(process.env.MIN_EXTRACTED_CHARS || 300);
+
+// ---------------------------------------------------------------------------
+// OUTPUT_DIR: ユーザー指定の出力先（B案: 環境変数）
+//   設定時: 全成果物を OUTPUT_DIR 直下に出力（日付/ハッシュサブフォルダなし）
+//   未設定: 従来通り DATA_DIR/YYYY-MM-DD/{company}_{position}_{hash}/
+// ---------------------------------------------------------------------------
+const OUTPUT_DIR: string | null = (() => {
+  const env = process.env.OUTPUT_DIR?.trim();
+  if (!env) return null;
+  const resolved = path.isAbsolute(env) ? env : path.resolve(process.cwd(), env);
+  return resolved;
+})();
+
+/** OUTPUT_DIR 使用時の特殊 runId マーカー */
+const CUSTOM_OUTPUT_RUN_ID = "__custom_output__";
 
 // ===========================================================================
 // ユーティリティ
@@ -275,12 +290,26 @@ const dateStr = (): string => new Date().toISOString().slice(0, 10);
 
 // ---------------------------------------------------------------------------
 // runId ↔ artifactDir の解決
-//   extract 時: data/YYYY-MM-DD/_pending_{hash}/  (runId = "YYYY-MM-DD/_pending_{hash}")
-//   structure 後: data/YYYY-MM-DD/{company}_{position}_{hash}/  (runId 更新)
+//   OUTPUT_DIR 使用時: CUSTOM_OUTPUT_RUN_ID → OUTPUT_DIR
+//   通常時: data/YYYY-MM-DD/{...} → 相対パス runId
 // ---------------------------------------------------------------------------
-const toRunId = (artifactDir: string): string => path.relative(DATA_DIR, artifactDir);
+const toRunId = (artifactDir: string): string => {
+  if (OUTPUT_DIR && artifactDir === OUTPUT_DIR) {
+    return CUSTOM_OUTPUT_RUN_ID;
+  }
+  return path.relative(DATA_DIR, artifactDir);
+};
 
 const resolveRunDir = (runId: string): string | null => {
+  // OUTPUT_DIR 使用時の特殊マーカー
+  if (runId === CUSTOM_OUTPUT_RUN_ID && OUTPUT_DIR) {
+    try {
+      fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+      return OUTPUT_DIR;
+    } catch {
+      return null;
+    }
+  }
   if (!runId || runId.includes("..") || path.isAbsolute(runId)) return null;
   const resolved = path.resolve(DATA_DIR, runId);
   if (!resolved.startsWith(DATA_DIR)) return null;
@@ -442,10 +471,12 @@ app.post("/api/extract", async (req, res) => {
       });
     }
 
-    // ディレクトリ作成: extract 時は企業名/ポジション不明のため _pending_{hash}
+    // ディレクトリ決定: OUTPUT_DIR 指定時はそこへ直接出力
     const hash = makeHash(String(url ?? "") + normalized.slice(0, 200));
     let artifactDir: string;
-    if (inputRunId) {
+    if (OUTPUT_DIR) {
+      artifactDir = OUTPUT_DIR;
+    } else if (inputRunId) {
       const existing = resolveRunDir(inputRunId);
       if (existing) {
         artifactDir = existing;
@@ -456,6 +487,7 @@ app.post("/api/extract", async (req, res) => {
       artifactDir = path.join(DATA_DIR, dateStr(), `_pending_${hash}`);
     }
     ensureDir(artifactDir);
+    log("extract", "出力先", { artifactDir });
 
     // job_raw.md
     fs.writeFileSync(path.join(artifactDir, "job_raw.md"), normalized, "utf8");
@@ -573,7 +605,10 @@ app.post("/api/structure", async (req, res) => {
     if (companyKey) {
       log("company", `company_key 解決: "${sanitized.company.name}" → "${companyKey}"`);
     }
-    const provenance = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
+    const mergeResult = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
+    if (mergeResult.staticApplied) {
+      log("company", "company_static 注入", { keys: mergeResult.staticAppliedKeys });
+    }
 
     // 時間外労働: 情報が無い場合は項目自体を削除
     if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
@@ -661,29 +696,35 @@ app.post("/api/structure", async (req, res) => {
     const showFixedOvertime = hasFixedOvertimeKeywords(normalizedText);
 
     // (7) ディレクトリ名を正式名に更新（_pending_ → company_position_hash）
+    //     OUTPUT_DIR 使用時はリネーム不要
     let finalDir = artifactDir;
     let finalRunId = runId;
-    const dirName = path.basename(artifactDir);
-    if (dirName.startsWith("_pending_")) {
-      const hash = dirName.replace("_pending_", "");
-      const companyPart = sanitizePathSegment(sanitized.company.name);
-      const positionPart = sanitizePathSegment(sanitized.position.title);
-      const newDirName = `${companyPart}_${positionPart}_${hash}`;
-      const newDir = path.join(path.dirname(artifactDir), newDirName);
-      try {
-        fs.renameSync(artifactDir, newDir);
-        finalDir = newDir;
-        finalRunId = toRunId(newDir);
-        log("structure", "ディレクトリ名更新", { from: dirName, to: newDirName });
-      } catch {
-        // rename 失敗は無視（元のパスを使い続ける）
+    if (!OUTPUT_DIR) {
+      const dirName = path.basename(artifactDir);
+      if (dirName.startsWith("_pending_")) {
+        const hash = dirName.replace("_pending_", "");
+        const companyPart = sanitizePathSegment(sanitized.company.name);
+        const positionPart = sanitizePathSegment(sanitized.position.title);
+        const newDirName = `${companyPart}_${positionPart}_${hash}`;
+        const newDir = path.join(path.dirname(artifactDir), newDirName);
+        try {
+          fs.renameSync(artifactDir, newDir);
+          finalDir = newDir;
+          finalRunId = toRunId(newDir);
+          log("structure", "ディレクトリ名更新", { from: dirName, to: newDirName });
+        } catch {
+          // rename 失敗は無視（元のパスを使い続ける）
+        }
       }
     }
 
-    // (8) 成果物保存
+    // (8) 成果物保存（static_applied は job.json に内部メタとして追加）
     const structuredMd = buildStructuredMarkdown(sanitized, normalizedText);
 
-    fs.writeFileSync(path.join(finalDir, "job.json"), JSON.stringify(sanitized, null, 2), "utf8");
+    const jobWithMeta = mergeResult.staticApplied
+      ? { ...sanitized, static_applied: true, static_applied_keys: mergeResult.staticAppliedKeys }
+      : sanitized;
+    fs.writeFileSync(path.join(finalDir, "job.json"), JSON.stringify(jobWithMeta, null, 2), "utf8");
     fs.writeFileSync(path.join(finalDir, "job_structured.md"), structuredMd, "utf8");
 
     // meta.json 更新
@@ -696,14 +737,14 @@ app.post("/api/structure", async (req, res) => {
       showFixedOvertime,
       companyName: sanitized.company.name,
       companyKey: companyKey ?? undefined,
-      provenance: Object.keys(provenance).length > 0 ? provenance : undefined,
+      provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
       positionTitle: sanitized.position.title,
       jobTitle,
       structuredAt: new Date().toISOString(),
     };
     fs.writeFileSync(path.join(finalDir, "meta.json"), JSON.stringify(updatedMeta, null, 2), "utf8");
 
-    log("structure", "保存完了", { runId: finalRunId });
+    log("structure", "保存完了", { runId: finalRunId, outputDir: finalDir });
 
     return res.json({
       runId: finalRunId,
@@ -1019,18 +1060,27 @@ app.post("/api/generate", async (req, res) => {
     if (companyKey) {
       log("company", `company_key 解決: "${sanitized.company.name}" → "${companyKey}"`);
     }
-    const provenance = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
+    const mergeResult = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
+    if (mergeResult.staticApplied) {
+      log("company", "company_static 注入", { keys: mergeResult.staticAppliedKeys });
+    }
 
     if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
       delete sanitized.work.overtime;
     }
 
     // --- B) 中間成果物を先行保存（バリデーション失敗でも必ず残す）---
-    const hash = makeHash(String(url ?? "") + normalized.slice(0, 200));
-    const companyPart = sanitizePathSegment(sanitized.company.name || "unknown");
-    const positionPart = sanitizePathSegment(sanitized.position.title || "unknown");
-    const artifactDir = path.join(DATA_DIR, dateStr(), `${companyPart}_${positionPart}_${hash}`);
+    let artifactDir: string;
+    if (OUTPUT_DIR) {
+      artifactDir = OUTPUT_DIR;
+    } else {
+      const hash = makeHash(String(url ?? "") + normalized.slice(0, 200));
+      const companyPart = sanitizePathSegment(sanitized.company.name || "unknown");
+      const positionPart = sanitizePathSegment(sanitized.position.title || "unknown");
+      artifactDir = path.join(DATA_DIR, dateStr(), `${companyPart}_${positionPart}_${hash}`);
+    }
     ensureDir(artifactDir);
+    log("generate", "出力先", { artifactDir });
 
     if (rawHtml && typeof rawHtml === "string") {
       fs.writeFileSync(path.join(artifactDir, "job_raw.html"), rawHtml, "utf8");
@@ -1127,7 +1177,11 @@ app.post("/api/generate", async (req, res) => {
     // --- 最終成果物の上書き保存（バリデーション通過後）---
     const structuredMd = buildStructuredMarkdown(sanitized, normalized);
     fs.writeFileSync(path.join(artifactDir, "job_structured.md"), structuredMd, "utf8");
-    fs.writeFileSync(path.join(artifactDir, "job.json"), JSON.stringify(sanitized, null, 2), "utf8");
+
+    const jobWithMeta = mergeResult.staticApplied
+      ? { ...sanitized, static_applied: true, static_applied_keys: mergeResult.staticAppliedKeys }
+      : sanitized;
+    fs.writeFileSync(path.join(artifactDir, "job.json"), JSON.stringify(jobWithMeta, null, 2), "utf8");
 
     const meta = {
       schemaVersion: "museum_jobposting_v0.3",
@@ -1142,7 +1196,7 @@ app.post("/api/generate", async (req, res) => {
       extractedLength,
       companyName: sanitized.company.name,
       companyKey: companyKey ?? undefined,
-      provenance: Object.keys(provenance).length > 0 ? provenance : undefined,
+      provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
       positionTitle: sanitized.position.title,
       savedAt: new Date().toISOString(),
     };
@@ -1187,5 +1241,7 @@ app.post("/api/generate", async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Museum JobTool Ver 0.3.4 — Server listening on port ${port}`);
+  console.log(`Museum JobTool Ver 0.3.5 — Server listening on port ${port}`);
+  if (OUTPUT_DIR) console.log(`  OUTPUT_DIR: ${OUTPUT_DIR}`);
+  if (ENABLE_COMPANY_STATIC) console.log(`  ENABLE_COMPANY_STATIC: ON`);
 });

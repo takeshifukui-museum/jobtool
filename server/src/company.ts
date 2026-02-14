@@ -73,6 +73,18 @@ export const clearAliasCache = (): void => {
 
 const COMPANY_STATIC_DIR = path.resolve(process.cwd(), "data", "company_static");
 
+/**
+ * company_static で注入を許可するフィールド一覧（ホワイトリスト方式）。
+ * 賃金・勤務地・雇用形態など致命項目は含めない（誤注入防止）。
+ */
+const ALLOWED_STATIC_FIELDS = [
+  "socialInsurance",
+  "benefits",
+  "selectionProcess",
+  "holidays",
+  "hours",
+] as const;
+
 export type CompanyStaticData = {
   socialInsurance?: string;
   benefits?: string[];
@@ -92,7 +104,13 @@ export const loadCompanyStatic = (companyKey: string): CompanyStaticData | null 
   try {
     if (!filePath.startsWith(COMPANY_STATIC_DIR)) return null;
     const raw = fs.readFileSync(filePath, "utf8");
-    return JSON.parse(raw) as CompanyStaticData;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    // ホワイトリストに無いフィールドは除外
+    const filtered: Record<string, unknown> = {};
+    for (const key of ALLOWED_STATIC_FIELDS) {
+      if (key in parsed) filtered[key] = parsed[key];
+    }
+    return filtered as CompanyStaticData;
   } catch {
     return null;
   }
@@ -106,62 +124,88 @@ export type FieldSource = "raw" | "company_static";
 
 export type Provenance = Record<string, FieldSource>;
 
+export type MergeResult = {
+  provenance: Provenance;
+  staticApplied: boolean;
+  staticAppliedKeys: string[];
+};
+
+/** 文字列が非空かどうか */
+const isNonEmpty = (s: string | undefined | null): boolean =>
+  typeof s === "string" && s.trim().length > 0;
+
+/** 配列が非空かどうか（空文字のみの配列は空扱い） */
+const isNonEmptyArray = (arr: string[] | undefined | null): boolean =>
+  Array.isArray(arr) && arr.filter((x) => x.trim()).length > 0;
+
 /**
  * 企業定型データを job にマージする（不足フィールドのみ注入、上書き禁止）。
  *
  * @param job        マージ対象の JobPosting
  * @param companyKey resolveCompanyKey で得た company_key（null なら何もしない）
  * @param enabled    true のときのみ注入する（ENABLE_COMPANY_STATIC 環境変数で制御）
- * @returns          provenance: 各フィールドの出典情報
+ * @returns          MergeResult: provenance + staticApplied + staticAppliedKeys
  */
 export const mergeCompanyStatic = (
   job: JobPosting,
   companyKey: string | null,
   enabled: boolean
-): Provenance => {
+): MergeResult => {
   const provenance: Provenance = {};
+  const staticAppliedKeys: string[] = [];
 
   // デフォルトは全フィールド "raw"
-  if (job.insurance.socialInsurance?.trim()) provenance["insurance.socialInsurance"] = "raw";
-  if (job.benefits.items?.filter((x) => x.trim()).length > 0) provenance["benefits.items"] = "raw";
-  if (job.selection.process?.trim()) provenance["selection.process"] = "raw";
-  if (job.work.holidays?.trim()) provenance["work.holidays"] = "raw";
-  if (job.work.hours?.trim()) provenance["work.hours"] = "raw";
+  if (isNonEmpty(job.insurance.socialInsurance)) provenance["insurance.socialInsurance"] = "raw";
+  if (isNonEmptyArray(job.benefits.items)) provenance["benefits.items"] = "raw";
+  if (isNonEmpty(job.selection.process)) provenance["selection.process"] = "raw";
+  if (isNonEmpty(job.work.holidays)) provenance["work.holidays"] = "raw";
+  if (isNonEmpty(job.work.hours)) provenance["work.hours"] = "raw";
 
   // enabled=false → 絶対に何もマージしない
-  if (!enabled) return provenance;
+  if (!enabled) return { provenance, staticApplied: false, staticAppliedKeys: [] };
 
   // company_key が無い → マージ不可
-  if (!companyKey) return provenance;
+  if (!companyKey) return { provenance, staticApplied: false, staticAppliedKeys: [] };
 
   const data = loadCompanyStatic(companyKey);
-  if (!data) return provenance;
+  if (!data) return { provenance, staticApplied: false, staticAppliedKeys: [] };
 
   // 上書き禁止: 値が空/未設定のフィールドだけ埋める
-  if (!job.insurance.socialInsurance?.trim() && data.socialInsurance) {
-    job.insurance.socialInsurance = data.socialInsurance;
+  // 注入元が空文字・空配列なら注入しない
+
+  if (!isNonEmpty(job.insurance.socialInsurance) && isNonEmpty(data.socialInsurance)) {
+    job.insurance.socialInsurance = data.socialInsurance!;
     provenance["insurance.socialInsurance"] = "company_static";
+    staticAppliedKeys.push("insurance.socialInsurance");
   }
 
-  if ((!job.benefits.items || job.benefits.items.filter((x) => x.trim()).length === 0) && data.benefits) {
-    job.benefits.items = data.benefits;
+  if (!isNonEmptyArray(job.benefits.items) && isNonEmptyArray(data.benefits)) {
+    job.benefits.items = data.benefits!;
     provenance["benefits.items"] = "company_static";
+    staticAppliedKeys.push("benefits.items");
   }
 
-  if (!job.selection.process?.trim() && data.selectionProcess) {
-    job.selection.process = data.selectionProcess;
+  if (!isNonEmpty(job.selection.process) && isNonEmpty(data.selectionProcess)) {
+    job.selection.process = data.selectionProcess!;
     provenance["selection.process"] = "company_static";
+    staticAppliedKeys.push("selection.process");
   }
 
-  if (!job.work.holidays?.trim() && data.holidays) {
-    job.work.holidays = data.holidays;
+  if (!isNonEmpty(job.work.holidays) && isNonEmpty(data.holidays)) {
+    job.work.holidays = data.holidays!;
     provenance["work.holidays"] = "company_static";
+    staticAppliedKeys.push("work.holidays");
   }
 
-  if (!job.work.hours?.trim() && data.hours) {
-    job.work.hours = data.hours;
+  if (!isNonEmpty(job.work.hours) && isNonEmpty(data.hours)) {
+    job.work.hours = data.hours!;
     provenance["work.hours"] = "company_static";
+    staticAppliedKeys.push("work.hours");
   }
 
-  return provenance;
+  return {
+    provenance,
+    staticApplied: staticAppliedKeys.length > 0,
+    staticAppliedKeys,
+  };
 };
