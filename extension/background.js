@@ -6,7 +6,7 @@ const API_RENDER   = `${API_BASE}/api/render`;
 // 互換: 旧 /api/generate（extract+structure を1回で行う）
 const API_GENERATE = `${API_BASE}/api/generate`;
 
-// R1: Service Worker では URL.createObjectURL が使えないため Data URL を使用
+// R1: Service Worker 互換 — base64 を Data URL に変換
 const base64ToDataUrl = (base64, contentType) => {
   return `data:${contentType};base64,${base64}`;
 };
