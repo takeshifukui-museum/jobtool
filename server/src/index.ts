@@ -14,6 +14,7 @@ import {
   requiredFieldsCheck,
   toFaithfulnessErrors,
 } from "./validate.js";
+import { normalizeCompanyName, mergeCompanyStatic } from "./company.js";
 
 const log = (tag: string, msg: string, data?: Record<string, unknown>) => {
   console.log(`[${tag}] ${msg}`, data ?? "");
@@ -101,6 +102,34 @@ const validateEvidence = (
   }
 
   return { warnings };
+};
+
+// ---------------------------------------------------------------------------
+// A) 企業名の辞書正規化（evidence検証後に適用）
+// ---------------------------------------------------------------------------
+const applyCompanyNameNormalization = (job: JobPosting): void => {
+  if (job.company.name) {
+    const before = job.company.name;
+    job.company.name = normalizeCompanyName(before);
+    if (before !== job.company.name) {
+      log("company", `企業名を辞書正規化: "${before}" → "${job.company.name}"`);
+    }
+  }
+};
+
+// ---------------------------------------------------------------------------
+// C) 【歓迎】マーカーチェック: rawText に歓迎マーカーが無ければ want を空にする
+// ---------------------------------------------------------------------------
+const WANT_MARKERS = ["【歓迎】", "歓迎スキル", "歓迎条件", "あると望ましい", "尚可"];
+
+const stripUnfoundedWant = (job: JobPosting, rawText: string, warnings: string[]): void => {
+  if (job.requirements.want.length === 0) return;
+  const hasWant = WANT_MARKERS.some((m) => rawText.includes(m));
+  if (!hasWant) {
+    log("want-check", "原文に歓迎マーカーが無いため want を除去", { wantCount: job.requirements.want.length });
+    warnings.push("WANT_REMOVED_NO_MARKER");
+    job.requirements.want = [];
+  }
 };
 
 const DATA_DIR = path.resolve(process.cwd(), "data");
@@ -234,8 +263,10 @@ const buildStructuredMarkdown = (job: JobPosting, rawText?: string): string => {
     `## 求める経験・スキル（原文そのまま）`,
     `### 必須`,
     listToMd(job.requirements.must),
-    `### 歓迎`,
-    listToMd(job.requirements.want),
+    // 歓迎が空なら非表示（推測禁止）
+    ...(job.requirements.want.filter((x) => x.trim()).length > 0
+      ? [`### 歓迎`, listToMd(job.requirements.want)]
+      : []),
     ``,
     `## 勤務条件`,
     `- 就業場所: ${job.work.location || "（記載なし）"}`,
@@ -249,13 +280,18 @@ const buildStructuredMarkdown = (job: JobPosting, rawText?: string): string => {
     job.salary.details?.filter((x) => x.trim()).length > 0 ? `\n${listToMd(job.salary.details)}` : ``,
     foLines.length > 0 ? `\n${foLines.join("\n")}` : ``,
     ``,
-    `## 福利厚生（原文そのまま）`,
-    listToMd(job.benefits.items),
-    ``,
-    `## 社会保険`,
-    job.insurance.socialInsurance?.trim() ? `- ${job.insurance.socialInsurance}` : `- （記載なし）`,
-    ``,
-    job.selection.process?.trim() ? `## 選考プロセス\n- ${job.selection.process}\n` : ``,
+    // 福利厚生: 空なら非表示
+    ...(job.benefits.items.filter((x) => x.trim()).length > 0
+      ? [`## 福利厚生（原文そのまま）`, listToMd(job.benefits.items), ``]
+      : []),
+    // 社会保険: 空なら非表示
+    ...(job.insurance.socialInsurance?.trim()
+      ? [`## 社会保険`, `- ${job.insurance.socialInsurance}`, ``]
+      : []),
+    // 選考プロセス: 空なら非表示
+    ...(job.selection.process?.trim()
+      ? [`## 選考プロセス`, `- ${job.selection.process}`, ``]
+      : []),
     `---`,
     `source: ${job.source.url}`,
   ];
@@ -435,6 +471,15 @@ app.post("/api/structure", async (req, res) => {
     // (2.5) evidence 検証: rawText 内に根拠が無い項目を無効化
     const evidenceResult = validateEvidence(sanitized, normalizedText);
     const warnings: string[] = [...evidenceResult.warnings];
+
+    // (2.6) 企業名の辞書正規化
+    applyCompanyNameNormalization(sanitized);
+
+    // (2.7) 【歓迎】マーカーチェック: 原文に無い歓迎スキルは除去
+    stripUnfoundedWant(sanitized, normalizedText, warnings);
+
+    // (2.8) 企業定型ブロックマージ（ENABLE_COMPANY_STATIC=1 のときのみ）
+    mergeCompanyStatic(sanitized);
 
     // (3) 空の求人票ガード
     if (!sanitized.company?.name?.trim()) {
@@ -839,6 +884,15 @@ app.post("/api/generate", async (req, res) => {
     const evidenceResult = validateEvidence(sanitized, normalized);
     const warnings: string[] = [...evidenceResult.warnings];
 
+    // 企業名の辞書正規化
+    applyCompanyNameNormalization(sanitized);
+
+    // 【歓迎】マーカーチェック
+    stripUnfoundedWant(sanitized, normalized, warnings);
+
+    // 企業定型ブロックマージ
+    mergeCompanyStatic(sanitized);
+
     if (!sanitized.company?.name?.trim()) {
       return res.status(400).json({
         error: { code: "JOB_JSON_EMPTY_OR_INVALID", message: "構造化結果に企業名がありません。" },
@@ -973,5 +1027,5 @@ app.post("/api/generate", async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Museum JobTool Ver 0.3.1 — Server listening on port ${port}`);
+  console.log(`Museum JobTool Ver 0.3.2 — Server listening on port ${port}`);
 });
