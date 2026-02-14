@@ -76,3 +76,8 @@ ATS求人ページ（主にHRMOS）を開いた状態でChrome拡張から求人
 - `server/src/extract.ts`: rawText正規化と配列の整形
 - `extension/*`: Chrome拡張UI・抽出・API呼び出し
 - `templates/museum_template.docx`: Wordテンプレ（差し替え前提）
+
+## ダウンロード方式について（data:URL vs Blob URL）
+- `data:URL` はファイルの中身を文字列としてURLに埋め込むため、サイズが大きいとChromeに「権限が必要です」と拒否されることがあります。
+- `Blob URL` はファイルをメモリ上に一時保存し、短いURLで参照するだけなので、サイズ制限に引っかかりません。
+- この拡張では Blob URL 方式に統一しています。`data:URL` でのダウンロードは禁止です（R1ルール）。

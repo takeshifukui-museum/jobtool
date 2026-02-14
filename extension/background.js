@@ -6,8 +6,13 @@ const API_RENDER   = `${API_BASE}/api/render`;
 // 互換: 旧 /api/generate（extract+structure を1回で行う）
 const API_GENERATE = `${API_BASE}/api/generate`;
 
-const base64ToDataUrl = (base64, contentType) => {
-  return `data:${contentType};base64,${base64}`;
+// R1: data:URL 禁止 — Blob URL に統一（権限エラー回避）
+const base64ToBlobUrl = (base64, contentType) => {
+  const bin = atob(base64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  const blob = new Blob([buf], { type: contentType });
+  return URL.createObjectURL(blob);
 };
 
 const sanitizePathPart = (s) => {
@@ -157,13 +162,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const filename = buildDownloadFilename(folderName, data.suggestedFilename || suggestedFilename);
         const contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-        const url = base64ToDataUrl(data.docx, contentType);
-        await chrome.downloads.download({
-          url,
-          filename,
-          saveAs: true
-        });
-        sendResponse({ ok: true, message: "ダウンロードしました", scoutText: data.scoutText || "" });
+        const blobUrl = base64ToBlobUrl(data.docx, contentType);
+
+        // R5: callback 形式で downloads.download を呼ぶ（MV3安定性）
+        chrome.downloads.download(
+          { url: blobUrl, filename, saveAs: true },
+          (downloadId) => {
+            // R4: Blob URL を遅延 revoke
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+
+            // R3: lastError を必ず確認
+            if (chrome.runtime.lastError) {
+              const err = chrome.runtime.lastError.message || "unknown download error";
+              console.error("[background] download failed:", err);
+              sendResponse({ ok: false, message: `download failed: ${err}` });
+              return;
+            }
+            console.log("[background] download started, id:", downloadId);
+            sendResponse({ ok: true, message: "ダウンロードしました", scoutText: data.scoutText || "" });
+          }
+        );
       } catch (error) {
         sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
       }
