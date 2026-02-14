@@ -70,9 +70,10 @@ btnGenerate.addEventListener("click", () => {
       return;
     }
 
-    // プレビューデータを保持
+    // プレビューデータを保持（runId 優先、sessionId は後方互換）
     currentSession = {
-      sessionId: response.sessionId,
+      runId: response.runId || response.sessionId,
+      sessionId: response.runId || response.sessionId,
       suggestedFilename: response.suggestedFilename
     };
 
@@ -127,7 +128,8 @@ btnGenerate.addEventListener("click", () => {
 // Step 2: 「OK — Word生成」→ docx生成 & ダウンロード
 // ===========================================================================
 btnRender.addEventListener("click", () => {
-  if (!currentSession?.sessionId) {
+  const runId = currentSession?.runId || currentSession?.sessionId;
+  if (!runId) {
     setStatus("エラー: セッション情報がありません。もう一度「求人票を解析」を押してください。");
     return;
   }
@@ -140,7 +142,8 @@ btnRender.addEventListener("click", () => {
   chrome.runtime.sendMessage(
     {
       type: "RENDER_JOB_DOCX",
-      sessionId: currentSession.sessionId,
+      runId,
+      sessionId: runId,
       folderName: folderName || undefined,
       suggestedFilename: currentSession.suggestedFilename
     },

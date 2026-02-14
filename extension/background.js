@@ -1,6 +1,10 @@
 const API_BASE = "http://localhost:3000";
+const API_EXTRACT  = `${API_BASE}/api/extract`;
+const API_STRUCTURE = `${API_BASE}/api/structure`;
+const API_RENDER   = `${API_BASE}/api/render`;
+
+// 互換: 旧 /api/generate（extract+structure を1回で行う）
 const API_GENERATE = `${API_BASE}/api/generate`;
-const API_RENDER = `${API_BASE}/api/render`;
 
 const base64ToDataUrl = (base64, contentType) => {
   return `data:${contentType};base64,${base64}`;
@@ -91,7 +95,9 @@ const apiPost = async (url, body) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // -----------------------------------------------------------------------
-  // Step 1: GENERATE_JOB_PREVIEW — 解析してプレビューデータを返す
+  // Step 1: GENERATE_JOB_PREVIEW
+  //   新パイプライン: extract → structure の2段階
+  //   フォールバック: /api/generate（互換）
   // -----------------------------------------------------------------------
   if (message.type === "GENERATE_JOB_PREVIEW") {
     chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
@@ -103,18 +109,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         const payload = await extractFromTab(tab.id);
 
-        const data = await apiPost(API_GENERATE, {
-          ...payload,
-          outputs: ["job_docx", "scout_text"]
+        // --- パイプライン: extract → structure ---
+        const extractResult = await apiPost(API_EXTRACT, {
+          rawText: payload.rawText,
+          rawHtml: payload.rawHtml,
+          url: payload.url,
+          title: payload.title,
+          siteHint: payload.siteHint,
+          extractMeta: payload.extractMeta
+        });
+
+        const structureResult = await apiPost(API_STRUCTURE, {
+          runId: extractResult.runId
         });
 
         sendResponse({
           ok: true,
-          sessionId: data.sessionId,
-          job: data.job,
-          structuredMd: data.structuredMd,
-          suggestedFilename: data.suggestedFilename,
-          meta: data.meta
+          // runId（新）+ sessionId（旧互換）
+          runId: structureResult.runId,
+          sessionId: structureResult.runId,
+          job: structureResult.job,
+          structuredMd: structureResult.structuredMd,
+          suggestedFilename: structureResult.suggestedFilename,
+          meta: structureResult.meta
         });
       } catch (error) {
         sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
@@ -129,13 +146,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "RENDER_JOB_DOCX") {
     (async () => {
       try {
-        const { sessionId, folderName, suggestedFilename } = message;
-        if (!sessionId) {
-          sendResponse({ ok: false, message: "sessionId がありません" });
+        const runId = message.runId || message.sessionId;
+        const { folderName, suggestedFilename } = message;
+        if (!runId) {
+          sendResponse({ ok: false, message: "runId がありません" });
           return;
         }
 
-        const data = await apiPost(API_RENDER, { sessionId });
+        const data = await apiPost(API_RENDER, { runId, approve: true });
 
         const filename = buildDownloadFilename(folderName, data.suggestedFilename || suggestedFilename);
         const contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
