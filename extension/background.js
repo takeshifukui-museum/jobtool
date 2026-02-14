@@ -3,9 +3,6 @@ const API_EXTRACT  = `${API_BASE}/api/extract`;
 const API_STRUCTURE = `${API_BASE}/api/structure`;
 const API_RENDER   = `${API_BASE}/api/render`;
 
-// 互換: 旧 /api/generate（extract+structure を1回で行う）
-const API_GENERATE = `${API_BASE}/api/generate`;
-
 // R1: Service Worker 互換 — base64 を Data URL に変換
 const base64ToDataUrl = (base64, contentType) => {
   return `data:${contentType};base64,${base64}`;
@@ -101,8 +98,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   //   フォールバック: /api/generate（互換）
   // -----------------------------------------------------------------------
   if (message.type === "GENERATE_JOB_PREVIEW") {
-    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+    (async () => {
       try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         const tab = tabs[0];
         if (!tab || !tab.id) {
           sendResponse({ ok: false, message: "アクティブタブが見つかりません" });
@@ -126,7 +124,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         sendResponse({
           ok: true,
-          // runId（新）+ sessionId（旧互換）
           runId: structureResult.runId,
           sessionId: structureResult.runId,
           job: structureResult.job,
@@ -137,7 +134,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (error) {
         sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
       }
-    });
+    })();
     return true;
   }
 
