@@ -15,6 +15,8 @@ import {
   optionalFieldWarnings,
   toFaithfulnessErrors,
   type RequiredFieldsResult,
+  type FaithfulnessResult,
+  type FaithfulnessMissing,
 } from "./validate.js";
 import {
   normalizeCompanyName,
@@ -24,6 +26,12 @@ import {
 } from "./company.js";
 
 const ENABLE_COMPANY_STATIC = process.env.ENABLE_COMPANY_STATIC === "true" || process.env.ENABLE_COMPANY_STATIC === "1";
+
+/**
+ * STRICT_NO_PARAPHRASE: true → 言い換え検出があれば即停止（厳格モード）
+ *                        false (デフォルト) → 警告のみで処理続行
+ */
+const STRICT_NO_PARAPHRASE = process.env.STRICT_NO_PARAPHRASE === "true" || process.env.STRICT_NO_PARAPHRASE === "1";
 
 const log = (tag: string, msg: string, data?: Record<string, unknown>) => {
   console.log(`[${tag}] ${msg}`, data ?? "");
@@ -191,6 +199,57 @@ const saveMissingRequiredReport = (
     "========================================",
   ].join("\n"));
 
+  return report;
+};
+
+// ---------------------------------------------------------------------------
+// 言い換え検出レポート保存（paraphrase_report.json）
+// ---------------------------------------------------------------------------
+
+type ParaphraseReportItem = {
+  field: string;
+  generatedValue: string;
+  rule: string;
+};
+
+type ParaphraseReport = {
+  count: number;
+  strictMode: boolean;
+  items: ParaphraseReportItem[];
+  timestamp: string;
+  artifactDir: string;
+};
+
+const saveParaphraseReport = (
+  dir: string,
+  faithResult: FaithfulnessResult
+): ParaphraseReport => {
+  const items: ParaphraseReportItem[] = faithResult.missing.map((m: FaithfulnessMissing) => ({
+    field: m.path,
+    generatedValue: m.value,
+    rule: "原文の正規化テキストに部分一致で見つからない（言い換え・要約の疑い）",
+  }));
+
+  const report: ParaphraseReport = {
+    count: faithResult.missing.length,
+    strictMode: STRICT_NO_PARAPHRASE,
+    items,
+    timestamp: new Date().toISOString(),
+    artifactDir: dir,
+  };
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "paraphrase_report.json"),
+      JSON.stringify(report, null, 2),
+      "utf8"
+    );
+  } catch (e) {
+    console.error(`[paraphrase] レポート保存失敗 (target: ${path.join(dir, "paraphrase_report.json")}):`, e);
+  }
+
+  log("paraphrase", `言い換え検出レポート保存: ${report.count}件`, { dir });
   return report;
 };
 
@@ -668,27 +727,32 @@ app.post("/api/structure", async (req, res) => {
       log("structure", "任意項目欠落（停止なし）", { missing: optResult.warnings });
     }
 
-    // (6) faithfulness チェック
+    // (6) faithfulness チェック（デフォルト: 警告のみ。STRICT_NO_PARAPHRASE=true で停止）
     const faithResult = faithfulnessCheck(sanitized, normalizedText);
     const faithErrors = toFaithfulnessErrors(faithResult);
 
     if (!faithResult.ok) {
-      warnings.push("FAITHFULNESS_VIOLATIONS_DETECTED");
       log("structure", "言い換え検出", { count: faithResult.missing.length });
 
-      // 致命的（5件以上）は停止
-      if (faithResult.missing.length >= 5) {
+      // paraphrase_report.json を必ず保存（根拠を残す）
+      saveParaphraseReport(artifactDir, faithResult);
+
+      if (STRICT_NO_PARAPHRASE) {
+        // 厳格モード: 1件でも停止
         return res.status(400).json({
           error: {
             code: "FAITHFULNESS_VIOLATION",
-            message: "原文に存在しない文言が混入しています",
+            message: `原文と異なる表現が検出されました（${faithResult.missing.length}件）。STRICT_NO_PARAPHRASE=true のため停止。`,
             missing: faithResult.missing,
           },
         });
       }
+
+      // デフォルト: 警告として記録し処理続行
+      warnings.push(`PARAPHRASE_WARNING: 原文と異なる表現の可能性（${faithResult.missing.length}件）。詳細は paraphrase_report.json を確認してください。`);
     }
 
-    // (6) プレビュー警告
+    // (6.5) プレビュー警告
     warnings.push(...buildWarnings(sanitized));
     warnings.push(...sanitized.compliance.warnings);
 
@@ -887,18 +951,22 @@ app.post("/api/render", async (req, res) => {
     }
 
     // faithfulness チェック（render 前最終防衛）
+    // デフォルト: 警告のみ。STRICT_NO_PARAPHRASE=true の場合のみ停止。
     let showFixedOvertime = true;
     try {
       const rawMd = fs.readFileSync(path.join(artifactDir, "job_raw.md"), "utf8");
       const faithResult = faithfulnessCheck(sanitized, rawMd);
-      if (faithResult.missing.length >= 5) {
-        return res.status(400).json({
-          error: {
-            code: "FAITHFULNESS_VIOLATION",
-            message: "原文に存在しない文言が混入しています",
-            missing: faithResult.missing,
-          },
-        });
+      if (!faithResult.ok) {
+        saveParaphraseReport(artifactDir, faithResult);
+        if (STRICT_NO_PARAPHRASE) {
+          return res.status(400).json({
+            error: {
+              code: "FAITHFULNESS_VIOLATION",
+              message: `原文と異なる表現が検出されました（${faithResult.missing.length}件）。STRICT_NO_PARAPHRASE=true のため停止。`,
+              missing: faithResult.missing,
+            },
+          });
+        }
       }
       showFixedOvertime = hasFixedOvertimeKeywords(rawMd);
     } catch { /* job_raw.md が無ければスキップ */ }
@@ -1151,22 +1219,28 @@ app.post("/api/generate", async (req, res) => {
       log("generate", "任意項目欠落（停止なし）", { missing: optResult.warnings });
     }
 
-    // faithfulness チェック
+    // faithfulness チェック（デフォルト: 警告のみ。STRICT_NO_PARAPHRASE=true で停止）
     const faithResult = faithfulnessCheck(sanitized, normalized);
     const faithErrors = toFaithfulnessErrors(faithResult);
 
     if (!faithResult.ok) {
-      warnings.push("FAITHFULNESS_VIOLATIONS_DETECTED");
       log("generate", "言い換え検出", { count: faithResult.missing.length });
-    }
-    if (faithResult.missing.length >= 5) {
-      return res.status(400).json({
-        error: {
-          code: "FAITHFULNESS_VIOLATION",
-          message: "原文に存在しない文言が混入しています",
-          missing: faithResult.missing,
-        },
-      });
+
+      // paraphrase_report.json を必ず保存
+      saveParaphraseReport(artifactDir, faithResult);
+
+      if (STRICT_NO_PARAPHRASE) {
+        return res.status(400).json({
+          error: {
+            code: "FAITHFULNESS_VIOLATION",
+            message: `原文と異なる表現が検出されました（${faithResult.missing.length}件）。STRICT_NO_PARAPHRASE=true のため停止。`,
+            missing: faithResult.missing,
+          },
+        });
+      }
+
+      // デフォルト: 警告として記録し処理続行
+      warnings.push(`PARAPHRASE_WARNING: 原文と異なる表現の可能性（${faithResult.missing.length}件）。詳細は paraphrase_report.json を確認してください。`);
     }
 
     warnings.push(...buildWarnings(sanitized));
@@ -1241,7 +1315,8 @@ app.post("/api/generate", async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Museum JobTool Ver 0.3.5 — Server listening on port ${port}`);
+  console.log(`Museum JobTool Ver 0.3.6 — Server listening on port ${port}`);
   if (OUTPUT_DIR) console.log(`  OUTPUT_DIR: ${OUTPUT_DIR}`);
   if (ENABLE_COMPANY_STATIC) console.log(`  ENABLE_COMPANY_STATIC: ON`);
+  if (STRICT_NO_PARAPHRASE) console.log(`  STRICT_NO_PARAPHRASE: ON (言い換え検出で停止)`);
 });
