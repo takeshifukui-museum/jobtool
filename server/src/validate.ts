@@ -94,6 +94,9 @@ export const checkFaithfulness = (
 
   // 固定残業代
   if (job.salary.fixedOvertime) {
+    if (job.salary.fixedOvertime.amount) {
+      check("salary.fixedOvertime.amount", job.salary.fixedOvertime.amount);
+    }
     if (job.salary.fixedOvertime.includedHours) {
       check("salary.fixedOvertime.includedHours", job.salary.fixedOvertime.includedHours);
     }

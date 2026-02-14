@@ -43,7 +43,11 @@ ${input.rawText}
   - 休日休暇: work.holidays（原文の該当文をそのまま）
   - 福利厚生: benefits.items[]（原文の箇条書き/文を1行ずつ、順序維持）
 - salary.details[] は年収レンジ等の原文行をそのまま（無ければ空配列）
-- 固定残業代がある場合は salary.fixedOvertime.includedHours と excessPayment に「原文の表現をそのまま」入れる（無い場合は空文字でよい）
+- 固定残業代がある場合:
+  - salary.fixedOvertime.amount に金額（原文そのまま。例: "55,220円"）
+  - salary.fixedOvertime.includedHours に時間数（原文そのまま。例: "月45時間分"）
+  - salary.fixedOvertime.excessPayment に超過分の扱い（原文そのまま。例: "超過分は別途支給"）
+  - 各項目が無い場合は空文字でよい
 - 時間外労働: 情報が無い場合は work.overtime.exists=false, details=\"\" とする（推測しない）
 - compliance.forbiddenDetected/warnings は空配列でよい
 - 禁止転載(性別/年齢/国籍/病歴)は含めない

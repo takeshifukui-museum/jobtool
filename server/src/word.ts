@@ -20,9 +20,9 @@ import {
   WidthType
 } from "docx";
 import { JobPosting } from "./schema.js";
-import { listToText } from "./extract.js";
+import { listToText, formatPostalCode, formatReadability } from "./extract.js";
 
-const keepLabels = ["賃金", "給与", "業務内容", "求める経験・スキル"];
+const keepLabels = ["賃金", "業務内容", "求める経験・スキル"];
 
 const removeEmptyRows = (docxBuffer: Buffer): Buffer => {
   const zip = new PizZip(docxBuffer);
@@ -92,7 +92,11 @@ const BORDERS = {
 };
 
 // ---------------------------------------------------------------------------
-// 固定の行順序（AIが並び替えない。常にこの順番）
+// 固定の行順序（Canonical Key 使用 — Ver 0.3）
+//   賃金 ← 給与 / 年収 / 月給 / 年収・待遇 / 報酬
+//   就業時間 ← 勤務時間 / 就業時間
+//   就業場所 ← 勤務地 / 配属先
+//   同一keyは1回のみ出力。
 // ---------------------------------------------------------------------------
 const FIXED_ROW_ORDER = [
   "業務内容",
@@ -100,14 +104,16 @@ const FIXED_ROW_ORDER = [
   "雇用形態",
   "契約期間",
   "試用期間",
-  "勤務地",
-  "勤務時間",
+  "就業場所",
+  "就業時間",
   "休憩時間",
   "休日休暇",
   "時間外労働",
   "賃金",
   "賃金詳細",
-  "固定残業代",
+  "固定残業代（金額）",
+  "固定残業代（時間数）",
+  "超過分の扱い",
   "社会保険",
   "福利厚生",
   "選考プロセス"
@@ -196,24 +202,21 @@ const buildJobBlock = (job: JobPosting["job"]): string => {
 };
 
 // ---------------------------------------------------------------------------
+// render直前の可読性整形 + 郵便番号整形
+// ---------------------------------------------------------------------------
+const applyRenderFormatting = (text: string): string => {
+  return formatReadability(formatPostalCode(text));
+};
+
+// ---------------------------------------------------------------------------
 // コード生成パス（テンプレートが無い/空の場合）
 // 重要: 固定順序。ATS順推定は行わない。
 // ---------------------------------------------------------------------------
 
 const renderJobDocxFromScratch = async (
   job: JobPosting,
-  opts?: { jobTitle?: string }
+  opts?: { jobTitle?: string; showFixedOvertime?: boolean }
 ): Promise<Buffer> => {
-
-  const fixedOvertimeText = job.salary.fixedOvertime
-    ? [
-        `固定残業代: ${job.salary.fixedOvertime.includedHours}`,
-        `超過分: ${job.salary.fixedOvertime.excessPayment}`,
-        job.salary.fixedOvertime.notes
-      ]
-        .filter(Boolean)
-        .join("\n")
-    : "";
 
   const overtimeText = job.work.overtime
     ? job.work.overtime.details
@@ -224,32 +227,45 @@ const renderJobDocxFromScratch = async (
     : "";
 
   // -----------------------------------------------------------------------
-  // 行データ構築（固定順序、空欄は出さない、賃金は必須で常に出す）
+  // 固定残業代: 原文に固定残業代関連語が存在する場合のみ表示
+  // 分割表示: 金額 / 時間数 / 超過分
+  // 未取得項目は出さない ただし表示可能部分は表示する
+  // -----------------------------------------------------------------------
+  const fo = job.salary.fixedOvertime;
+  const showFO = opts?.showFixedOvertime !== false && fo;
+  const foAmount = showFO ? (fo.amount ?? "").trim() : "";
+  const foHours = showFO ? (fo.includedHours ?? "").trim() : "";
+  const foExcess = showFO ? (fo.excessPayment ?? "").trim() : "";
+
+  // -----------------------------------------------------------------------
+  // 行データ構築（Canonical Key使用、空欄非表示）
   // -----------------------------------------------------------------------
   const rowData: Record<string, string> = {
-    "業務内容": buildJobBlock(job.job),
-    "求める経験・スキル": joinSkillBlock(job.requirements.must, job.requirements.want),
+    "業務内容": applyRenderFormatting(buildJobBlock(job.job)),
+    "求める経験・スキル": applyRenderFormatting(joinSkillBlock(job.requirements.must, job.requirements.want)),
     "雇用形態": job.position.employmentType ?? "",
     "契約期間": job.position.contractTerm ?? "",
     "試用期間": job.position.probation ?? "",
-    "勤務地": job.work.location ?? "",
-    "勤務時間": job.work.hours ?? "",
+    "就業場所": applyRenderFormatting(job.work.location ?? ""),
+    "就業時間": job.work.hours ?? "",
     "休憩時間": job.work.breakTime ?? "",
-    "休日休暇": job.work.holidays ?? "",
+    "休日休暇": applyRenderFormatting(job.work.holidays ?? ""),
     "時間外労働": overtimeText,
-    "賃金": job.salary.summary,
-    "賃金詳細": listToText(job.salary.details),
-    "固定残業代": fixedOvertimeText,
+    "賃金": applyRenderFormatting(job.salary.summary),
+    "賃金詳細": applyRenderFormatting(listToText(job.salary.details)),
+    "固定残業代（金額）": foAmount,
+    "固定残業代（時間数）": foHours,
+    "超過分の扱い": foExcess,
     "社会保険": job.insurance.socialInsurance ?? "",
-    "福利厚生": listToText(job.benefits.items),
+    "福利厚生": applyRenderFormatting(listToText(job.benefits.items)),
     "選考プロセス": job.selection.process ?? ""
   };
 
-  // 固定順序で行を構築。空の行は出さない（ただし「賃金」は必須なので常に出す）
+  // 固定順序で行を構築。空の行は出さない（valueが空 → 行を出さない）
   const rows: Array<[string, string]> = [];
   for (const label of FIXED_ROW_ORDER) {
     const value = (rowData[label] ?? "").trim();
-    if (!value && label !== "賃金") continue; // 空欄項目は出さない
+    if (!value) continue; // 空欄項目は出さない
     rows.push([label, value]);
   }
 
@@ -344,7 +360,7 @@ const renderJobDocxFromScratch = async (
 export const renderJobDocx = async (
   job: JobPosting,
   templatePath: string,
-  opts?: { jobTitle?: string }
+  opts?: { jobTitle?: string; showFixedOvertime?: boolean }
 ): Promise<Buffer> => {
   const template = fs.readFileSync(templatePath);
   if (template.length === 0) {
@@ -359,11 +375,14 @@ export const renderJobDocx = async (
   const parser = (expressionParser as any).configure({}) as any;
   const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true, parser } as any);
 
-  const fixedOvertimeText = job.salary.fixedOvertime
+  const fo = job.salary.fixedOvertime;
+  const showFO = opts?.showFixedOvertime !== false && fo;
+  const fixedOvertimeText = showFO
     ? [
-        `固定残業代: ${job.salary.fixedOvertime.includedHours}`,
-        `超過分: ${job.salary.fixedOvertime.excessPayment}`,
-        job.salary.fixedOvertime.notes
+        fo.amount ? `金額: ${fo.amount}` : "",
+        fo.includedHours ? `時間数: ${fo.includedHours}` : "",
+        fo.excessPayment ? `超過分: ${fo.excessPayment}` : "",
+        fo.notes
       ]
         .filter(Boolean)
         .join("\n")
@@ -381,27 +400,27 @@ export const renderJobDocx = async (
     company: { name: job.company.name },
     position: { title: job.position.title, contractTerm: job.position.contractTerm ?? "" },
     job: {
-      responsibilities_text: listToText(job.job.responsibilities),
+      responsibilities_text: applyRenderFormatting(listToText(job.job.responsibilities)),
       notes: job.job.notes ?? ""
     },
     requirements: {
-      must_text: listToText(job.requirements.must),
-      want_text: listToText(job.requirements.want)
+      must_text: applyRenderFormatting(listToText(job.requirements.must)),
+      want_text: applyRenderFormatting(listToText(job.requirements.want))
     },
     work: {
-      location: job.work.location ?? "",
+      location: applyRenderFormatting(job.work.location ?? ""),
       hours: job.work.hours ?? "",
       breakTime: job.work.breakTime ?? "",
-      holidays: job.work.holidays ?? "",
+      holidays: applyRenderFormatting(job.work.holidays ?? ""),
       overtime_text: overtimeText
     },
     salary: {
-      summary: job.salary.summary,
-      details_text: listToText(job.salary.details),
+      summary: applyRenderFormatting(job.salary.summary),
+      details_text: applyRenderFormatting(listToText(job.salary.details)),
       fixedOvertime_text: fixedOvertimeText
     },
     insurance: { socialInsurance: job.insurance.socialInsurance ?? "" },
-    benefits: { items_text: listToText(job.benefits.items) },
+    benefits: { items_text: applyRenderFormatting(listToText(job.benefits.items)) },
     selection: { process: job.selection.process ?? "" }
   };
 

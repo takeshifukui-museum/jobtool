@@ -76,19 +76,42 @@ btnGenerate.addEventListener("click", () => {
       suggestedFilename: response.suggestedFilename
     };
 
-    // 警告表示
+    // Ver 0.3: 警告表示（カテゴリ分け）
     const warnings = response.meta?.warnings ?? [];
     const faithViolations = response.meta?.faithViolations ?? [];
     if (warnings.length > 0 || faithViolations.length > 0) {
-      const lines = [];
-      if (warnings.length > 0) lines.push("警告: " + warnings.join(", "));
+      warningsEl.innerHTML = "";
+
+      // カテゴリ別に警告を分類
+      const warningLabels = {
+        "SOCIAL_INSURANCE_MISSING": "社会保険の情報が未取得です",
+        "BENEFITS_MISSING": "福利厚生の情報が未取得です",
+        "OVERTIME_MISSING": "時間外労働の情報が未取得です",
+        "FAITHFULNESS_VIOLATIONS_DETECTED": "原文忠実性チェックで差異を検出"
+      };
+
+      for (const w of warnings) {
+        const key = w.split(":")[0];
+        const label = warningLabels[key] || w;
+        const div = document.createElement("div");
+        div.className = key.includes("MISSING") ? "warn-info" : "warn-error";
+        div.textContent = label;
+        warningsEl.appendChild(div);
+      }
+
       if (faithViolations.length > 0) {
-        lines.push("原文忠実性チェック:");
+        const header = document.createElement("div");
+        header.className = "warn-error";
+        header.textContent = `原文忠実性チェック（${faithViolations.length}件）:`;
+        warningsEl.appendChild(header);
         faithViolations.forEach((v) => {
-          lines.push(`  ${v.field}: ${v.value}`);
+          const item = document.createElement("div");
+          item.className = "warn-info";
+          item.textContent = `  ${v.field}: ${v.value}`;
+          warningsEl.appendChild(item);
         });
       }
-      warningsEl.textContent = lines.join("\n");
+
       warningsEl.style.display = "block";
     }
 

@@ -86,8 +86,9 @@ export const jobPostingSchema = {
         fixedOvertime: {
           type: "object",
           additionalProperties: false,
-          required: ["includedHours", "excessPayment", "notes"],
+          required: ["amount", "includedHours", "excessPayment", "notes"],
           properties: {
+            amount: { type: "string" },
             includedHours: { type: "string" },
             excessPayment: { type: "string" },
             notes: { type: "string" }
@@ -149,7 +150,7 @@ export type JobPosting = {
   salary: {
     summary: string;
     details: string[];
-    fixedOvertime?: { includedHours: string; excessPayment: string; notes?: string };
+    fixedOvertime?: { amount: string; includedHours: string; excessPayment: string; notes?: string };
   };
   insurance: { socialInsurance?: string };
   benefits: { items: string[] };

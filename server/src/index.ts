@@ -6,7 +6,7 @@ import express from "express";
 import cors from "cors";
 import { generateJobPosting, generateScoutText } from "./openai.js";
 import { sanitizeJobPosting } from "./sanitize.js";
-import { normalizeRawText } from "./extract.js";
+import { normalizeRawText, hasFixedOvertimeKeywords } from "./extract.js";
 import { renderJobDocx, resolveTemplatePath, getTemplateStat } from "./word.js";
 import { JobPosting } from "./schema.js";
 import { checkFaithfulness } from "./validate.js";
@@ -51,37 +51,89 @@ const listToMd = (items: string[] | undefined): string => {
   return list.map((x) => `- ${x}`).join("\n");
 };
 
-const buildStructuredMarkdown = (job: JobPosting): string => {
+// ---------------------------------------------------------------------------
+// Ver 0.3: 必須欠落チェック（停止条件）
+// ---------------------------------------------------------------------------
+type RequiredFieldCheck = { label: string; present: boolean };
+
+const checkRequiredFields = (job: JobPosting): RequiredFieldCheck[] => {
+  return [
+    { label: "業務内容", present: (job.job.responsibilities ?? []).filter((x) => x.trim()).length > 0 },
+    { label: "就業場所", present: Boolean(job.work.location?.trim()) },
+    { label: "就業時間", present: Boolean(job.work.hours?.trim()) },
+    { label: "休日休暇", present: Boolean(job.work.holidays?.trim()) },
+    { label: "賃金", present: Boolean(job.salary.summary?.trim()) }
+  ];
+};
+
+// ---------------------------------------------------------------------------
+// Ver 0.3: プレビュー警告生成
+// ---------------------------------------------------------------------------
+const buildPreviewWarnings = (job: JobPosting): string[] => {
+  const warnings: string[] = [];
+
+  // 社会保険未取得
+  if (!job.insurance.socialInsurance?.trim()) {
+    warnings.push("SOCIAL_INSURANCE_MISSING: 社会保険の情報が取得できませんでした。原文をご確認ください。");
+  }
+
+  // 福利厚生未取得
+  if (!job.benefits.items || job.benefits.items.filter((x) => x.trim()).length === 0) {
+    warnings.push("BENEFITS_MISSING: 福利厚生の情報が取得できませんでした。");
+  }
+
+  // 時間外労働未取得
+  if (!job.work.overtime || (!job.work.overtime.details?.trim() && job.work.overtime.exists === false)) {
+    warnings.push("OVERTIME_MISSING: 時間外労働の情報が取得できませんでした。");
+  }
+
+  return warnings;
+};
+
+// ---------------------------------------------------------------------------
+// buildStructuredMarkdown — Canonical Key 使用（Ver 0.3）
+// ---------------------------------------------------------------------------
+const buildStructuredMarkdown = (job: JobPosting, rawText?: string): string => {
   const overtimeText = job.work.overtime
     ? job.work.overtime.details
       ? `時間外労働: ${job.work.overtime.details}`
       : job.work.overtime.exists
         ? "時間外労働あり"
-        : "時間外労働なし"
+        : ""
     : "";
 
-  const fixedOvertimeText = job.salary.fixedOvertime
-    ? [job.salary.fixedOvertime.includedHours, job.salary.fixedOvertime.excessPayment, job.salary.fixedOvertime.notes]
-        .filter((x) => x && x.trim() !== "")
-        .join("\n")
-    : "";
+  // 固定残業代: 原文に関連語がある場合のみ表示
+  const showFixedOvertime = rawText ? hasFixedOvertimeKeywords(rawText) : Boolean(
+    job.salary.fixedOvertime &&
+    ((job.salary.fixedOvertime.amount ?? "").trim() ||
+     (job.salary.fixedOvertime.includedHours ?? "").trim() ||
+     (job.salary.fixedOvertime.excessPayment ?? "").trim())
+  );
 
-  return [
+  const foLines: string[] = [];
+  if (showFixedOvertime && job.salary.fixedOvertime) {
+    const fo = job.salary.fixedOvertime;
+    if (fo.amount?.trim()) foLines.push(`- 固定残業代（金額）: ${fo.amount}`);
+    if (fo.includedHours?.trim()) foLines.push(`- 固定残業代（時間数）: ${fo.includedHours}`);
+    if (fo.excessPayment?.trim()) foLines.push(`- 超過分の扱い: ${fo.excessPayment}`);
+  }
+
+  const lines = [
     `# 求人票（構造化）`,
     ``,
     `## 企業`,
     `- 企業名: ${job.company.name || "（不明）"}`,
-    `- 企業概要: ${job.company.summary || "（記載なし）"}`,
+    job.company.summary?.trim() ? `- 企業概要: ${job.company.summary}` : ``,
     ``,
     `## 採用ポジション`,
     `- タイトル: ${job.position.title || "（不明）"}`,
-    `- 雇用形態: ${job.position.employmentType || "（記載なし）"}`,
-    `- 契約期間: ${job.position.contractTerm || "（記載なし）"}`,
-    `- 試用期間: ${job.position.probation || "（記載なし）"}`,
+    job.position.employmentType?.trim() ? `- 雇用形態: ${job.position.employmentType}` : ``,
+    job.position.contractTerm?.trim() ? `- 契約期間: ${job.position.contractTerm}` : ``,
+    job.position.probation?.trim() ? `- 試用期間: ${job.position.probation}` : ``,
     ``,
     `## 業務内容（原文そのまま）`,
     listToMd(job.job.responsibilities),
-    job.job.notes ? `\n\n補足:\n${job.job.notes}` : ``,
+    job.job.notes?.trim() ? `\n補足:\n${job.job.notes}` : ``,
     ``,
     `## 求める経験・スキル（原文そのまま）`,
     `### 必須`,
@@ -91,31 +143,29 @@ const buildStructuredMarkdown = (job: JobPosting): string => {
     listToMd(job.requirements.want),
     ``,
     `## 勤務条件`,
-    `- 勤務地: ${job.work.location || "（記載なし）"}`,
-    `- 勤務時間: ${job.work.hours || "（記載なし）"}`,
-    `- 休憩時間: ${job.work.breakTime || "（記載なし）"}`,
+    `- 就業場所: ${job.work.location || "（記載なし）"}`,
+    `- 就業時間: ${job.work.hours || "（記載なし）"}`,
+    job.work.breakTime?.trim() ? `- 休憩時間: ${job.work.breakTime}` : ``,
     `- 休日休暇（原文そのまま）: ${job.work.holidays || "（記載なし）"}`,
-    overtimeText ? `- 時間外労働: ${overtimeText.replace(/^時間外労働:\s*/, "")}` : ``,
+    overtimeText ? `- ${overtimeText}` : ``,
     ``,
-    `## 賃金・待遇（原文そのまま）`,
+    `## 賃金（原文そのまま）`,
     `- 賃金: ${job.salary.summary || "（必須）"}`,
-    job.salary.details && job.salary.details.length > 0 ? `\n${listToMd(job.salary.details)}` : ``,
-    fixedOvertimeText ? `\n\n固定残業代:\n${fixedOvertimeText}` : ``,
+    job.salary.details && job.salary.details.filter((x) => x.trim()).length > 0 ? `\n${listToMd(job.salary.details)}` : ``,
+    foLines.length > 0 ? `\n${foLines.join("\n")}` : ``,
     ``,
     `## 福利厚生（原文そのまま）`,
     listToMd(job.benefits.items),
     ``,
     `## 社会保険`,
-    `- ${job.insurance.socialInsurance || "（記載なし）"}`,
+    job.insurance.socialInsurance?.trim() ? `- ${job.insurance.socialInsurance}` : `- （記載なし）`,
     ``,
-    `## 選考プロセス`,
-    `- ${job.selection.process || "（記載なし）"}`,
-    ``,
+    job.selection.process?.trim() ? `## 選考プロセス\n- ${job.selection.process}\n` : ``,
     `---`,
     `source: ${job.source.url}`
-  ]
-    .filter((x) => x !== "")
-    .join("\n");
+  ];
+
+  return lines.filter((x) => x !== ``).join("\n");
 };
 
 const ensureDataDir = (dir: string): void => {
@@ -187,7 +237,7 @@ app.post("/api/generate", async (req, res) => {
     const { url, title, rawText, rawHtml, siteHint, jobTitle, extractMeta } = req.body ?? {};
 
     // -----------------------------------------------------------------------
-    // (A-1) fetch ガード: rawText 必須
+    // (1) fetch ガード: rawText 必須
     // -----------------------------------------------------------------------
     if (!rawText || String(rawText).trim() === "") {
       return res.status(400).json({
@@ -196,7 +246,7 @@ app.post("/api/generate", async (req, res) => {
     }
 
     // -----------------------------------------------------------------------
-    // (A-1) extract: 正規化 + 文字数チェック
+    // (2) extract: 正規化 + 文字数チェック
     // -----------------------------------------------------------------------
     const normalizedText = normalizeRawText(String(rawText));
     const extractedLength = normalizedText.length;
@@ -217,7 +267,7 @@ app.post("/api/generate", async (req, res) => {
     }
 
     // -----------------------------------------------------------------------
-    // (B) structure: OpenAI で構造化
+    // (3) structure: OpenAI で構造化
     // -----------------------------------------------------------------------
     log("OpenAI構造化開始");
     const job = await generateJobPosting({
@@ -239,7 +289,7 @@ app.post("/api/generate", async (req, res) => {
     );
 
     // -----------------------------------------------------------------------
-    // (2) 空の求人票 根絶ガード
+    // (4) 空の求人票 根絶ガード
     // -----------------------------------------------------------------------
     if (!sanitized.company?.name?.trim()) {
       return res.status(400).json({
@@ -249,11 +299,6 @@ app.post("/api/generate", async (req, res) => {
     if (!sanitized.position?.title?.trim()) {
       return res.status(400).json({
         error: { code: "JOB_JSON_EMPTY_OR_INVALID", message: "構造化結果にポジション名がありません。" }
-      });
-    }
-    if (!sanitized.salary.summary || sanitized.salary.summary.trim() === "") {
-      return res.status(400).json({
-        error: { code: "SALARY_REQUIRED", message: "賃金情報が取得できませんでした。原文に賃金の記載があるか確認してください。" }
       });
     }
 
@@ -276,23 +321,35 @@ app.post("/api/generate", async (req, res) => {
     }
 
     // -----------------------------------------------------------------------
-    // (3) 言い換え禁止の機械チェック
+    // (5) Ver 0.3: 必須欠落チェック（停止条件）
+    //     業務内容 / 就業場所 / 就業時間 / 休日休暇 / 賃金
+    // -----------------------------------------------------------------------
+    const requiredChecks = checkRequiredFields(sanitized);
+    const missingFields = requiredChecks.filter((c) => !c.present);
+
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        error: {
+          code: "REQUIRED_FIELDS_MISSING",
+          message: `必須項目が欠落しています: ${missingFields.map((f) => f.label).join("、")}`,
+          missingFields: missingFields.map((f) => f.label)
+        }
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // (6) 言い換え禁止の機械チェック（Ver 0.3: 1件以上でWord生成不可）
+    //     job.json の各 value が job_raw.md に部分一致で存在するか検証
     // -----------------------------------------------------------------------
     const faithViolations = checkFaithfulness(sanitized, normalizedText);
     const warnings: string[] = [];
 
-    if (!sanitized.job.responsibilities || sanitized.job.responsibilities.length === 0) {
-      warnings.push("RESPONSIBILITIES_EMPTY");
-    }
-    if (!sanitized.requirements.must || sanitized.requirements.must.length === 0) {
-      warnings.push("REQUIREMENTS_MUST_EMPTY");
-    }
     if (faithViolations.length > 0) {
       warnings.push("FAITHFULNESS_VIOLATIONS_DETECTED");
       log("言い換え検出", { count: faithViolations.length, fields: faithViolations.map((v) => v.field) });
     }
 
-    // 致命的な言い換え（5件以上）はエラーにする
+    // Ver 0.3: 言い換え検出があればエラー（Word生成不可）
     if (faithViolations.length >= 5) {
       return res.status(400).json({
         error: {
@@ -304,9 +361,21 @@ app.post("/api/generate", async (req, res) => {
     }
 
     // -----------------------------------------------------------------------
+    // (7) Ver 0.3: プレビュー警告
+    // -----------------------------------------------------------------------
+    const previewWarnings = buildPreviewWarnings(sanitized);
+    warnings.push(...previewWarnings);
+
+    // 固定残業代: 原文に関連語がない場合は fixedOvertime を無効化
+    const showFixedOvertime = hasFixedOvertimeKeywords(normalizedText);
+    if (!showFixedOvertime && sanitized.salary.fixedOvertime) {
+      log("固定残業代: 原文に関連語が無いため非表示");
+    }
+
+    // -----------------------------------------------------------------------
     // プレビュー用成果物を保存
     // -----------------------------------------------------------------------
-    const structuredMd = buildStructuredMarkdown(sanitized);
+    const structuredMd = buildStructuredMarkdown(sanitized, normalizedText);
     const artifactDir = buildArtifactDir(sanitized.company.name, sanitized.position.title, String(url ?? ""));
     const metaWarnings = [...warnings, ...sanitized.compliance.warnings];
 
@@ -339,8 +408,10 @@ app.post("/api/generate", async (req, res) => {
 
     // meta.json
     const meta = {
+      schemaVersion: "museum_jobposting_v0.3",
       warnings: metaWarnings,
       faithViolations: faithViolations.length > 0 ? faithViolations : undefined,
+      showFixedOvertime,
       url: url || undefined,
       title: title || undefined,
       jobTitle: typeof jobTitle === "string" ? jobTitle : undefined,
@@ -368,7 +439,8 @@ app.post("/api/generate", async (req, res) => {
       ),
       meta: {
         warnings: metaWarnings,
-        faithViolations: faithViolations.length > 0 ? faithViolations : undefined
+        faithViolations: faithViolations.length > 0 ? faithViolations : undefined,
+        showFixedOvertime
       }
     });
   } catch (error) {
@@ -441,17 +513,51 @@ app.post("/api/render", async (req, res) => {
     }
 
     // -----------------------------------------------------------------------
-    // 必須項目チェック（render前の最終防衛）
+    // Ver 0.3: 必須項目チェック（render前の最終防衛）
     // -----------------------------------------------------------------------
-    if (!sanitized.company?.name?.trim()) {
-      return res.status(400).json({ error: { code: "REQUIRED_FIELD_MISSING", message: "企業名が空です。" } });
+    const requiredChecks = checkRequiredFields(sanitized);
+    const missingFields = requiredChecks.filter((c) => !c.present);
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        error: {
+          code: "REQUIRED_FIELDS_MISSING",
+          message: `必須項目が欠落しています: ${missingFields.map((f) => f.label).join("、")}`,
+          missingFields: missingFields.map((f) => f.label)
+        }
+      });
     }
-    if (!sanitized.position?.title?.trim()) {
-      return res.status(400).json({ error: { code: "REQUIRED_FIELD_MISSING", message: "ポジション名が空です。" } });
+
+    // -----------------------------------------------------------------------
+    // Ver 0.3: 言い換えチェック再検証（render前の最終防衛）
+    // -----------------------------------------------------------------------
+    let showFixedOvertime = true;
+    try {
+      const rawMdPath = path.join(artifactDir, "job_raw.md");
+      const rawMd = fs.readFileSync(rawMdPath, "utf8");
+      const faithViolations = checkFaithfulness(sanitized, rawMd);
+      if (faithViolations.length >= 5) {
+        return res.status(400).json({
+          error: {
+            code: "FAITHFULNESS_CHECK_FAILED",
+            message: `原文忠実性チェックに失敗しました（${faithViolations.length}件）。Word生成を阻止しました。`,
+            violations: faithViolations
+          }
+        });
+      }
+      // 固定残業代: 原文に関連語がない場合は非表示
+      showFixedOvertime = hasFixedOvertimeKeywords(rawMd);
+    } catch {
+      // job_raw.md が無い場合はスキップ
     }
-    if (!sanitized.salary?.summary?.trim()) {
-      return res.status(400).json({ error: { code: "REQUIRED_FIELD_MISSING", message: "賃金情報が空です。" } });
-    }
+
+    // meta.json から showFixedOvertime を優先取得
+    try {
+      const metaPath = path.join(artifactDir, "meta.json");
+      const metaData = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      if (typeof metaData.showFixedOvertime === "boolean") {
+        showFixedOvertime = metaData.showFixedOvertime;
+      }
+    } catch { /* ignore */ }
 
     // -----------------------------------------------------------------------
     // テンプレート解決
@@ -481,7 +587,7 @@ app.post("/api/render", async (req, res) => {
     // -----------------------------------------------------------------------
     let docxBuffer: Buffer;
     try {
-      log("Word差し込み開始", { templatePath });
+      log("Word差し込み開始", { templatePath, showFixedOvertime });
       // meta.json から jobTitle を取得
       let jobTitle: string | undefined;
       try {
@@ -490,7 +596,7 @@ app.post("/api/render", async (req, res) => {
         jobTitle = metaData.jobTitle;
       } catch { /* ignore */ }
 
-      docxBuffer = await renderJobDocx(sanitized, templatePath, { jobTitle });
+      docxBuffer = await renderJobDocx(sanitized, templatePath, { jobTitle, showFixedOvertime });
       log("Word差し込み完了", { outputSize: docxBuffer.length });
     } catch (error) {
       console.error(error);
