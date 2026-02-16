@@ -20,7 +20,7 @@ import {
   WidthType
 } from "docx";
 import { JobPosting } from "./schema.js";
-import { listToText, formatPostalCode, formatReadability, formatBullets } from "./extract.js";
+import { listToText, formatPostalCode, formatPostalCodeLineBreak, formatReadability, formatBullets } from "./extract.js";
 
 const keepLabels = ["賃金", "業務内容", "求める経験・スキル"];
 
@@ -183,6 +183,18 @@ const loadLogo = (): { data: Buffer; path: string } | null => {
   }
 };
 
+/** PNG の IHDR チャンクから画像サイズを取得 */
+const readPngDimensions = (buf: Buffer): { width: number; height: number } | null => {
+  // PNG: 8-byte signature + IHDR chunk (4 len + 4 "IHDR" + 4 width + 4 height)
+  if (buf.length < 24) return null;
+  const w = buf.readUInt32BE(16);
+  const h = buf.readUInt32BE(20);
+  if (w === 0 || h === 0) return null;
+  return { width: w, height: h };
+};
+
+const LOGO_TARGET_WIDTH = 220;
+
 const makeRun = (text: string, opts?: { bold?: boolean; size?: number }) => {
   return new TextRun({
     text,
@@ -305,7 +317,7 @@ const renderJobDocxFromScratch = async (
     "雇用形態": job.position.employmentType ?? "",
     "契約期間": job.position.contractTerm ?? "",
     "試用期間": job.position.probation ?? "",
-    "就業場所": applyRenderFormatting(job.work.location ?? ""),
+    "就業場所": formatPostalCodeLineBreak(applyRenderFormatting(job.work.location ?? "")),
     "就業時間": job.work.hours ?? "",
     "休憩時間": job.work.breakTime ?? "",
     "休日休暇": applyRenderFormatting(job.work.holidays ?? ""),
@@ -362,7 +374,11 @@ const renderJobDocxFromScratch = async (
             new ImageRun({
               type: "png",
               data: logo.data,
-              transformation: { width: 220, height: 56 }
+              transformation: (() => {
+                const dim = readPngDimensions(logo.data);
+                const h = dim ? Math.round(LOGO_TARGET_WIDTH * dim.height / dim.width) : 69;
+                return { width: LOGO_TARGET_WIDTH, height: h };
+              })()
             })
           ]
         })
@@ -474,7 +490,7 @@ export const renderJobDocx = async (
       want_text: applyRenderFormatting(listToText(job.requirements.want))
     },
     work: {
-      location: applyRenderFormatting(job.work.location ?? ""),
+      location: formatPostalCodeLineBreak(applyRenderFormatting(job.work.location ?? "")),
       hours: job.work.hours ?? "",
       breakTime: job.work.breakTime ?? "",
       holidays: applyRenderFormatting(job.work.holidays ?? ""),

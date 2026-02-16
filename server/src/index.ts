@@ -23,6 +23,7 @@ import {
   resolveCompanyKey,
   resolveCompanyKeyWithHints,
   resolveDisplayName,
+  getDisplayCompanyName,
   mergeCompanyStatic,
   applyCompanyDefaults,
   type MergeResult,
@@ -329,9 +330,13 @@ const sanitizeFilename = (s: string, maxLen = 80): string => {
   return t || "求人情報";
 };
 
-const buildSuggestedFilename = (pageTitle: string | undefined, positionTitle: string): string => {
+const buildSuggestedFilename = (pageTitle: string | undefined, positionTitle: string, companyName?: string): string => {
+  const company = companyName ? sanitizeFilename(companyName, 30) : "";
   const raw = (pageTitle && pageTitle.trim()) || positionTitle || "";
   const title = sanitizeFilename(raw);
+  if (company) {
+    return `求人票_${company}_${title || "求人情報"}.docx`;
+  }
   return `求人票_${title || "求人情報"}.docx`;
 };
 
@@ -835,7 +840,7 @@ app.post("/api/structure", async (req, res) => {
       companyKey: companyKey ?? undefined,
       provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
       injected: defaultsResult.applied
-        ? { fields: defaultsResult.appliedFields, sources: defaultsResult.sources }
+        ? { fields: defaultsResult.appliedFields, sources: defaultsResult.sources, sourceUrl: defaultsResult.sourceUrl }
         : undefined,
       positionTitle: sanitized.position.title,
       jobTitle,
@@ -849,7 +854,7 @@ app.post("/api/structure", async (req, res) => {
       runId: finalRunId,
       structuredMd,
       job: sanitized,
-      suggestedFilename: buildSuggestedFilename(jobTitle ?? title, sanitized.position.title),
+      suggestedFilename: buildSuggestedFilename(jobTitle ?? title, sanitized.position.title, sanitized.company.displayName ?? sanitized.company.name),
       meta: {
         warnings,
         faithViolations: faithErrors.length > 0 ? faithErrors : undefined,
@@ -1077,7 +1082,7 @@ app.post("/api/render", async (req, res) => {
       fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
     } catch { /* ignore */ }
 
-    const suggestedFilename = buildSuggestedFilename(sanitized.position.title, sanitized.position.title);
+    const suggestedFilename = buildSuggestedFilename(sanitized.position.title, sanitized.position.title, sanitized.company.displayName ?? sanitized.company.name);
 
     return res.json({
       docx: docxBuffer.toString("base64"),
@@ -1345,7 +1350,7 @@ app.post("/api/generate", async (req, res) => {
       companyKey: companyKey ?? undefined,
       provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
       injected: defaultsResult.applied
-        ? { fields: defaultsResult.appliedFields, sources: defaultsResult.sources }
+        ? { fields: defaultsResult.appliedFields, sources: defaultsResult.sources, sourceUrl: defaultsResult.sourceUrl }
         : undefined,
       positionTitle: sanitized.position.title,
       savedAt: new Date().toISOString(),
@@ -1363,7 +1368,8 @@ app.post("/api/generate", async (req, res) => {
       structuredMd,
       suggestedFilename: buildSuggestedFilename(
         typeof jobTitle === "string" ? jobTitle : typeof title === "string" ? title : undefined,
-        sanitized.position.title
+        sanitized.position.title,
+        sanitized.company.displayName ?? sanitized.company.name
       ),
       meta: {
         warnings,

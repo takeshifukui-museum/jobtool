@@ -214,44 +214,111 @@ export const mergeCompanyStatic = (
 };
 
 // ---------------------------------------------------------------------------
-// D) company_profiles.json — 企業プロファイル（定型差し込み + 表示名）
-//    server/config/company_profiles.json を読み込み、
-//    company_key に一致するプロファイルの defaults を欠落項目にのみ注入する。
-//    差し込み対象は 4項目のみ:
-//      work.hours / work.holidays / benefits.items / insurance.socialInsurance
-//    賃金・固定残業代・雇用形態は絶対に差し込まない。
-//    根拠（sources）を明記し、job.meta.injected に記録する。
+// D-pre) field_aliases.json — 見出しラベル同義語マッピング
+//   server/config/field_aliases.json を読み込み、見出し→canonical フィールドパスの
+//   逆引きマップを構築する。
 // ---------------------------------------------------------------------------
 
-const PROFILES_PATH = path.resolve(process.cwd(), "config", "company_profiles.json");
+const FIELD_ALIASES_PATH = path.resolve(process.cwd(), "config", "field_aliases.json");
+
+type FieldAliasMap = Record<string, string>; // label → canonical field path
+
+let fieldAliasCache: FieldAliasMap | null = null;
+
+/**
+ * field_aliases.json を読み込み、ラベル→フィールドパスの逆引きマップを返す。
+ * 例: { "所在地": "work.location", "勤務地": "work.location", ... }
+ */
+export const loadFieldAliases = (): FieldAliasMap => {
+  if (fieldAliasCache) return fieldAliasCache;
+  const map: FieldAliasMap = {};
+  try {
+    const raw = fs.readFileSync(FIELD_ALIASES_PATH, "utf8");
+    const data = JSON.parse(raw) as Record<string, string[]>;
+    for (const [fieldPath, aliases] of Object.entries(data)) {
+      if (fieldPath.startsWith("_")) continue; // _doc 等のメタ項目をスキップ
+      if (!Array.isArray(aliases)) continue;
+      for (const alias of aliases) {
+        if (typeof alias === "string" && alias.trim()) {
+          map[alias.trim()] = fieldPath;
+        }
+      }
+    }
+  } catch {
+    // ファイルが無い場合は空マップ
+  }
+  fieldAliasCache = map;
+  return map;
+};
+
+export const clearFieldAliasCache = (): void => {
+  fieldAliasCache = null;
+};
+
+/**
+ * 見出しラベルから canonical フィールドパスを解決する。
+ * field_aliases.json に登録されていないラベルは null を返す。
+ */
+export const resolveFieldAlias = (label: string): string | null => {
+  const map = loadFieldAliases();
+  return map[label.trim()] ?? null;
+};
+
+// ---------------------------------------------------------------------------
+// D) company_overrides.json — 企業定型差し込み（統合設定ファイル）
+//    server/config/company_overrides.json を読み込み、
+//    company_key に一致するエントリの fields を欠落項目にのみ注入する。
+//    差し込み条件:
+//      - enabled=true かつ source.url が存在する場合のみ適用
+//      - allowed_fields（無ければ _config.default_allowed_fields）に含まれるもののみ
+//      - _config.never_allow_fields_prefix に該当するものは絶対に差し込まない
+//      - 既に値がある場合は絶対に上書きしない
+//    根拠（source.url）を job.meta.injected に記録する。
+// ---------------------------------------------------------------------------
+
+const OVERRIDES_PATH = path.resolve(process.cwd(), "config", "company_overrides.json");
 
 type ResolveHint = { contains: string; key: string };
 
-export type CompanyProfile = {
+type OverrideSource = {
+  url: string;
+  title?: string;
+  last_verified?: string;
+};
+
+export type CompanyOverrideEntry = {
+  enabled: boolean;
   displayCompanyName?: string;
-  defaults: Record<string, string | string[]>;
-  sources: Record<string, string[]>;
+  source: OverrideSource;
+  allowed_fields?: string[];
+  fields: Record<string, string | string[]>;
 };
 
-type ProfilesConfig = {
+type OverridesGlobalConfig = {
+  default_allowed_fields: string[];
+  never_allow_fields_prefix: string[];
+};
+
+type OverridesConfig = {
+  _config?: OverridesGlobalConfig;
   _resolveHints?: ResolveHint[];
-} & Record<string, CompanyProfile>;
+} & Record<string, CompanyOverrideEntry>;
 
-let profilesCache: ProfilesConfig | null = null;
+let overridesCache: OverridesConfig | null = null;
 
-const loadProfilesConfig = (): ProfilesConfig => {
-  if (profilesCache) return profilesCache;
+const loadOverridesConfig = (): OverridesConfig => {
+  if (overridesCache) return overridesCache;
   try {
-    const raw = fs.readFileSync(PROFILES_PATH, "utf8");
-    profilesCache = JSON.parse(raw) as ProfilesConfig;
+    const raw = fs.readFileSync(OVERRIDES_PATH, "utf8");
+    overridesCache = JSON.parse(raw) as OverridesConfig;
   } catch {
-    profilesCache = {} as ProfilesConfig;
+    overridesCache = {} as OverridesConfig;
   }
-  return profilesCache;
+  return overridesCache;
 };
 
-export const clearProfilesCache = (): void => {
-  profilesCache = null;
+export const clearOverridesCache = (): void => {
+  overridesCache = null;
 };
 
 /**
@@ -260,7 +327,7 @@ export const clearProfilesCache = (): void => {
  * 先に定義されたルールが優先（より具体的なキーを先に並べる）。
  */
 export const resolveCompanyKeyWithHints = (companyName: string): string | null => {
-  const config = loadProfilesConfig();
+  const config = loadOverridesConfig();
   const hints = config._resolveHints;
   if (!hints || !Array.isArray(hints)) return null;
   const name = companyName.trim();
@@ -273,21 +340,21 @@ export const resolveCompanyKeyWithHints = (companyName: string): string | null =
 };
 
 /**
- * プロファイルの displayCompanyName を job.company.displayName に設定する。
+ * overrides の displayCompanyName を job.company.displayName に設定する。
  * 原文の company.name は変更しない。
  *
  * 方針:
  *   - 原文に「株式会社」が含まれていればそのまま（既に正式名称）
- *   - 含まれていなければプロファイルの displayCompanyName を使用
+ *   - 含まれていなければ overrides の displayCompanyName を使用
  */
 export const resolveDisplayName = (
   job: JobPosting,
   companyKey: string | null
 ): string | undefined => {
   if (!companyKey) return undefined;
-  const config = loadProfilesConfig();
-  const profile = config[companyKey] as CompanyProfile | undefined;
-  if (!profile?.displayCompanyName) return undefined;
+  const config = loadOverridesConfig();
+  const entry = config[companyKey] as CompanyOverrideEntry | undefined;
+  if (!entry?.displayCompanyName) return undefined;
 
   const originalName = job.company.name?.trim() ?? "";
   // 既に正式法人名を含んでいる場合はそのまま維持
@@ -295,82 +362,115 @@ export const resolveDisplayName = (
     job.company.displayName = originalName;
     return originalName;
   }
-  job.company.displayName = profile.displayCompanyName;
-  return profile.displayCompanyName;
+  job.company.displayName = entry.displayCompanyName;
+  return entry.displayCompanyName;
+};
+
+/**
+ * company_key から displayCompanyName を取得する（ファイル名用）。
+ * job オブジェクトを変更しない読み取り専用版。
+ */
+export const getDisplayCompanyName = (companyKey: string | null): string | undefined => {
+  if (!companyKey) return undefined;
+  const config = loadOverridesConfig();
+  const entry = config[companyKey] as CompanyOverrideEntry | undefined;
+  return entry?.displayCompanyName;
 };
 
 // ---------------------------------------------------------------------------
-// E) applyCompanyDefaults — プロファイルからの定型差し込み（4項目限定）
+// E) applyCompanyDefaults — overrides からの定型差し込み
 // ---------------------------------------------------------------------------
 
 export type DefaultsResult = {
   applied: boolean;
   appliedFields: string[];
   sources: Record<string, string[]>;
+  companyKey: string | null;
+  sourceUrl: string | null;
 };
 
+/** フィールドが never_allow に該当するか */
+const isNeverAllowed = (field: string, neverPrefixes: string[]): boolean =>
+  neverPrefixes.some((prefix) => field === prefix || field.startsWith(prefix + "."));
+
 /**
- * company_profiles.json の defaults を job に差し込む。
+ * company_overrides.json の fields を job に差し込む。
  *
- * 【絶対原則】
- *  - 対象は 4項目のみ: work.hours / work.holidays / benefits.items / insurance.socialInsurance
- *  - 賃金・固定残業代・雇用形態は絶対に差し込まない
+ * 【適用条件】
+ *  - enabled=true かつ source.url がある場合のみ
+ *  - allowed_fields（無ければ default_allowed_fields）に含まれるもののみ
+ *  - never_allow_fields_prefix に該当するものは絶対に差し込まない
  *  - 既に値がある場合は絶対に上書きしない
- *  - 差し込み根拠（sources）を返す
  */
 export const applyCompanyDefaults = (
   job: JobPosting,
   companyKey: string | null
 ): DefaultsResult => {
-  const empty: DefaultsResult = { applied: false, appliedFields: [], sources: {} };
+  const empty: DefaultsResult = { applied: false, appliedFields: [], sources: {}, companyKey, sourceUrl: null };
   if (!companyKey) return empty;
 
-  const config = loadProfilesConfig();
-  const profile = config[companyKey] as CompanyProfile | undefined;
-  if (!profile?.defaults) return empty;
+  const config = loadOverridesConfig();
+  const entry = config[companyKey] as CompanyOverrideEntry | undefined;
+
+  // enabled=false or 未定義 → 適用しない
+  if (!entry?.enabled) return empty;
+  // source.url 必須（根拠URL無しでは差し込み禁止）
+  if (!entry.source?.url?.trim()) return empty;
+  if (!entry.fields) return empty;
+
+  const globalConfig = config._config;
+  const allowedFields = entry.allowed_fields
+    ?? globalConfig?.default_allowed_fields
+    ?? ["work.hours", "work.holidays", "benefits.items", "insurance.socialInsurance"];
+  const neverPrefixes = globalConfig?.never_allow_fields_prefix ?? [];
 
   const appliedFields: string[] = [];
   const appliedSources: Record<string, string[]> = {};
-  const d = profile.defaults;
-  const s = profile.sources ?? {};
+  const d = entry.fields;
+  const sourceUrl = entry.source.url;
+
+  // 差し込みヘルパー: allowed かつ never_allow でないフィールドだけ処理
+  const canApply = (field: string): boolean =>
+    allowedFields.includes(field) && !isNeverAllowed(field, neverPrefixes);
 
   // 1) work.hours
-  if (typeof d["work.hours"] === "string" && d["work.hours"].trim()) {
+  if (canApply("work.hours") && typeof d["work.hours"] === "string" && d["work.hours"].trim()) {
     if (!isNonEmpty(job.work.hours)) {
       job.work.hours = d["work.hours"];
       appliedFields.push("work.hours");
-      if (s["work.hours"]) appliedSources["work.hours"] = s["work.hours"];
+      appliedSources["work.hours"] = [sourceUrl];
     }
   }
 
   // 2) work.holidays
-  if (typeof d["work.holidays"] === "string" && d["work.holidays"].trim()) {
+  if (canApply("work.holidays") && typeof d["work.holidays"] === "string" && d["work.holidays"].trim()) {
     if (!isNonEmpty(job.work.holidays)) {
       job.work.holidays = d["work.holidays"];
       appliedFields.push("work.holidays");
-      if (s["work.holidays"]) appliedSources["work.holidays"] = s["work.holidays"];
+      appliedSources["work.holidays"] = [sourceUrl];
     }
   }
 
   // 3) benefits.items (配列) or benefits.text (文字列→配列化)
-  const benefitsArr = Array.isArray(d["benefits.items"])
-    ? d["benefits.items"].filter((x): x is string => typeof x === "string" && x.trim().length > 0)
-    : typeof d["benefits.text"] === "string" && d["benefits.text"].trim()
-      ? [d["benefits.text"]]
-      : [];
-  if (benefitsArr.length > 0 && !isNonEmptyArray(job.benefits.items)) {
-    job.benefits.items = benefitsArr;
-    appliedFields.push("benefits.items");
-    const bSrc = s["benefits.items"] ?? s["benefits.text"];
-    if (bSrc) appliedSources["benefits.items"] = bSrc;
+  if (canApply("benefits.items")) {
+    const benefitsArr = Array.isArray(d["benefits.items"])
+      ? d["benefits.items"].filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      : typeof d["benefits.text"] === "string" && d["benefits.text"].trim()
+        ? [d["benefits.text"]]
+        : [];
+    if (benefitsArr.length > 0 && !isNonEmptyArray(job.benefits.items)) {
+      job.benefits.items = benefitsArr;
+      appliedFields.push("benefits.items");
+      appliedSources["benefits.items"] = [sourceUrl];
+    }
   }
 
   // 4) insurance.socialInsurance
-  if (typeof d["insurance.socialInsurance"] === "string" && d["insurance.socialInsurance"].trim()) {
+  if (canApply("insurance.socialInsurance") && typeof d["insurance.socialInsurance"] === "string" && d["insurance.socialInsurance"].trim()) {
     if (!isNonEmpty(job.insurance.socialInsurance)) {
       job.insurance.socialInsurance = d["insurance.socialInsurance"];
       appliedFields.push("insurance.socialInsurance");
-      if (s["insurance.socialInsurance"]) appliedSources["insurance.socialInsurance"] = s["insurance.socialInsurance"];
+      appliedSources["insurance.socialInsurance"] = [sourceUrl];
     }
   }
 
@@ -378,5 +478,7 @@ export const applyCompanyDefaults = (
     applied: appliedFields.length > 0,
     appliedFields,
     sources: appliedSources,
+    companyKey,
+    sourceUrl,
   };
 };

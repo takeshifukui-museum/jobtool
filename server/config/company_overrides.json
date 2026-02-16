@@ -1,12 +1,30 @@
 {
-  "sega_group": {
+  "_config": {
+    "default_allowed_fields": ["work.hours", "work.holidays", "benefits.items", "insurance.socialInsurance"],
+    "never_allow_fields_prefix": [
+      "salary", "compensation", "pay",
+      "job.description", "job.responsibilities",
+      "requirements",
+      "position.employmentType", "position.contractTerm", "position.probation"
+    ]
+  },
+  "_resolveHints": [
+    { "contains": "札幌スタジオ", "key": "sega_sapporo_studio" },
+    { "contains": "フェイブ", "key": "sega_fave" },
+    { "contains": "セガ", "key": "sega" }
+  ],
+
+  "sega": {
+    "enabled": true,
+    "displayCompanyName": "株式会社セガ",
     "source": {
-      "name": "SEGAグループ共通制度ページ",
-      "url": "（あとで福井が貼るURLを入れる枠）"
+      "url": "https://www.sega.co.jp/recruit/fresh/details/",
+      "title": "セガ 新卒採用 募集要項",
+      "last_verified": "2025-01-01"
     },
     "fields": {
-      "work.hours": "フレックスタイム制（標準労働時間8時間/日）",
-      "work.holidays": "完全週休2日制（土・日）、祝日、年末年始休暇、年次有給休暇、慶弔休暇、夏季休暇",
+      "work.hours": "フレックスタイム制（コアタイムなし） 標準的な就業時間帯 9:00〜17:30",
+      "work.holidays": "完全週休2日制（土・日）、祝日、年次有給休暇、夏季休日（3日）、年末年始休日、慶弔休暇、リフレッシュ休暇 等",
       "benefits.items": [
         "通勤手当（会社規定に基づき支給）",
         "社員持株会制度",
@@ -14,8 +32,51 @@
         "育児・介護休業制度",
         "健康診断"
       ],
-      "insurance.socialInsurance": "健康保険、厚生年金保険、雇用保険、労災保険 完備",
-      "selection.process": "書類選考 → 面接（複数回） → 内定"
+      "insurance.socialInsurance": "健康保険、厚生年金保険、雇用保険、労災保険"
+    }
+  },
+
+  "sega_sapporo_studio": {
+    "enabled": true,
+    "displayCompanyName": "株式会社セガ 札幌スタジオ",
+    "source": {
+      "url": "https://www.sega.co.jp/recruit/fresh/details/sapporostudio/",
+      "title": "セガ 札幌スタジオ 新卒採用 募集要項",
+      "last_verified": "2025-01-01"
+    },
+    "fields": {
+      "work.hours": "フレックスタイム制（コアタイムなし） 標準的な就業時間帯 9:00〜17:30",
+      "work.holidays": "完全週休2日制（土・日）、祝日、年次有給休暇、夏季休日（3日）、年末年始休日、慶弔休暇、リフレッシュ休暇 等",
+      "benefits.items": [
+        "通勤手当（会社規定に基づき支給）",
+        "社員持株会制度",
+        "慶弔見舞金制度",
+        "育児・介護休業制度",
+        "健康診断"
+      ],
+      "insurance.socialInsurance": "健康保険、厚生年金保険、雇用保険、労災保険"
+    }
+  },
+
+  "sega_fave": {
+    "enabled": true,
+    "displayCompanyName": "株式会社セガフェイブ",
+    "source": {
+      "url": "https://www.segafave.co.jp/recruit/details/",
+      "title": "セガフェイブ 採用情報 募集要項",
+      "last_verified": "2025-01-01"
+    },
+    "fields": {
+      "work.hours": "フレックスタイム制（コアタイムなし） 標準的な就業時間帯 9:00〜17:30",
+      "work.holidays": "完全週休2日制（土・日）、祝日、年次有給休暇、夏季休日（3日）、年末年始休日、慶弔休暇、リフレッシュ休暇 等",
+      "benefits.items": [
+        "通勤手当（会社規定に基づき支給）",
+        "社員持株会制度",
+        "慶弔見舞金制度",
+        "育児・介護休業制度",
+        "健康診断"
+      ],
+      "insurance.socialInsurance": "健康保険、厚生年金保険、雇用保険、労災保険"
     }
   }
 }

@@ -1,0 +1,14 @@
+{
+  "_doc": "見出しラベルの同義語マッピング。ソースページの見出し表記 → canonical フィールドパス。抽出時の見出し解決に使用。",
+  "work.location": ["就業場所", "勤務地", "所在地", "配属先", "勤務先"],
+  "work.hours": ["就業時間", "勤務時間", "労働時間"],
+  "work.holidays": ["休日休暇", "休日・休暇", "休暇"],
+  "work.breakTime": ["休憩時間", "休憩"],
+  "salary.summary": ["賃金", "給与", "年収", "月給", "報酬", "年収・待遇"],
+  "position.employmentType": ["雇用形態", "就業形態"],
+  "position.contractTerm": ["契約期間", "雇用期間"],
+  "position.probation": ["試用期間"],
+  "insurance.socialInsurance": ["社会保険", "保険"],
+  "benefits.items": ["福利厚生", "待遇", "諸手当"],
+  "selection.process": ["選考プロセス", "選考フロー", "採用プロセス", "選考の流れ"]
+}
