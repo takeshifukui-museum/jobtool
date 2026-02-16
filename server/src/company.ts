@@ -83,7 +83,7 @@ const COMPANY_STATIC_DIR = path.resolve(process.cwd(), "data", "company_static")
 const ALLOWED_STATIC_FIELDS = [
   "socialInsurance",
   "benefits",
-  "selectionProcess",
+  // "selectionProcess" は定型差し込み禁止（求人本文に記載がある場合のみ出力）
   "holidays",
   "hours",
 ] as const;
@@ -188,11 +188,7 @@ export const mergeCompanyStatic = (
     staticAppliedKeys.push("benefits.items");
   }
 
-  if (!isNonEmpty(job.selection.process) && isNonEmpty(data.selectionProcess)) {
-    job.selection.process = data.selectionProcess!;
-    provenance["selection.process"] = "company_static";
-    staticAppliedKeys.push("selection.process");
-  }
+  // selectionProcess は定型差し込み禁止（求人本文記載のみ出力）
 
   if (!isNonEmpty(job.work.holidays) && isNonEmpty(data.holidays)) {
     job.work.holidays = data.holidays!;

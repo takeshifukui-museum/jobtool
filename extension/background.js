@@ -157,7 +157,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return;
           }
           console.log("[background] download started, id:", downloadId);
-          sendResponse({ ok: true, message: "ダウンロードしました", scoutText: data.scoutText || "" });
+
+          // スカウト文を .txt として同じフォルダに保存（UI非表示、ファイル出力のみ）
+          if (data.scoutText) {
+            try {
+              const txtFilename = filename.replace(/\.docx$/i, "").replace(/^求人票_/, "スカウト文_") + ".txt";
+              const txtBase64 = btoa(unescape(encodeURIComponent(data.scoutText)));
+              const txtDataUrl = `data:text/plain;charset=utf-8;base64,${txtBase64}`;
+              chrome.downloads.download({ url: txtDataUrl, filename: txtFilename, saveAs: false }, (txtId) => {
+                if (chrome.runtime.lastError) {
+                  console.warn("[background] scout text download failed:", chrome.runtime.lastError.message);
+                } else {
+                  console.log("[background] scout text saved, id:", txtId);
+                }
+              });
+            } catch (e) {
+              console.warn("[background] scout text save error:", e);
+            }
+          }
+
+          sendResponse({ ok: true, message: "ダウンロードしました" });
         });
       } catch (error) {
         sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });

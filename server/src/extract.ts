@@ -40,9 +40,23 @@ export const formatPostalCode = (text: string): string => {
 // 意味変更は禁止。
 // ---------------------------------------------------------------------------
 export const formatReadability = (text: string): string => {
-  let result = text;
-  // 「・」「■」「●」の前で改行（既に改行がある場合は追加しない）
-  result = result.replace(/([^\n])(・|■|●)/g, "$1\n$2");
+  // 「・」「■」「●」の前で改行（括弧内を除外、既に改行がある場合は追加しない）
+  // 括弧内（（…）、「…」）の「・」は分割しない
+  let result = "";
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "（" || ch === "(" || ch === "「") depth++;
+    else if (ch === "）" || ch === ")" || ch === "」") depth = Math.max(0, depth - 1);
+
+    if (depth === 0 && (ch === "・" || ch === "■" || ch === "●")) {
+      // 直前が改行でなければ改行を挿入
+      if (i > 0 && text[i - 1] !== "\n") {
+        result += "\n";
+      }
+    }
+    result += ch;
+  }
   // 「【必須】」「【歓迎】」の前で改行
   result = result.replace(/([^\n])(【必須】|【歓迎】)/g, "$1\n$2");
   // 連続空白整理（改行以外の連続空白→1個）

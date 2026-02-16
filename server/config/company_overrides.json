@@ -11,7 +11,9 @@
   "_resolveHints": [
     { "contains": "札幌スタジオ", "key": "sega_sapporo_studio" },
     { "contains": "フェイブ", "key": "sega_fave" },
-    { "contains": "セガ", "key": "sega" }
+    { "contains": "セガ", "key": "sega" },
+    { "contains": "ポールトゥウィン", "key": "ptw" },
+    { "contains": "PTW", "key": "ptw" }
   ],
 
   "sega": {
@@ -78,5 +80,15 @@
       ],
       "insurance.socialInsurance": "健康保険、厚生年金保険、雇用保険、労災保険"
     }
+  },
+
+  "ptw": {
+    "enabled": false,
+    "displayCompanyName": "ポールトゥウィン株式会社",
+    "source": {
+      "url": "",
+      "title": ""
+    },
+    "fields": {}
   }
 }

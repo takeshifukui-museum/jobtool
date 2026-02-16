@@ -160,10 +160,7 @@ btnRender.addEventListener("click", () => {
         return;
       }
 
-      let msg = "完了: ダウンロードしました";
-      if (response.scoutText) {
-        msg += `\n\nスカウト文:\n${response.scoutText}`;
-      }
+      const msg = "完了: ダウンロードしました";
       setStatus(msg);
       // 生成完了後はボタンを隠す
       btnRow.style.display = "none";

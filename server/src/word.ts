@@ -141,9 +141,7 @@ const FIXED_ROW_ORDER = [
   "休日休暇",
   "時間外労働",
   "賃金",
-  "固定残業代（金額）",
-  "固定残業代（時間数）",
-  "超過分の扱い",
+  // 固定残業代は賃金欄に集約（独立行は廃止）
   "社会保険",
   "福利厚生",
   "選考プロセス"
@@ -294,7 +292,7 @@ const renderJobDocxFromScratch = async (
   const foExcess = showFO ? (fo.excessPayment ?? "").trim() : "";
 
   // -----------------------------------------------------------------------
-  // 固定残業代: 全フィールド空なら3行とも非表示
+  // 固定残業代: 賃金欄に集約（独立行は出さない）
   // -----------------------------------------------------------------------
   const foAllEmpty = !foAmount && !foHours && !foExcess;
 
@@ -306,10 +304,22 @@ const renderJobDocxFromScratch = async (
   const salDetailsText = isSalaryDetailsRedundant(job.salary.summary, salDetails)
     ? ""
     : applyRenderFormatting(listToText(salDetails));
-  const salaryValue = [salSummary, salDetailsText].filter(Boolean).join("\n");
+
+  // 固定残業代を賃金欄に統合（重複出力防止）
+  const foLines: string[] = [];
+  if (!foAllEmpty) {
+    if (foAmount) foLines.push(`固定残業代: ${foAmount}`);
+    if (foHours) foLines.push(`固定残業時間数: ${foHours}`);
+    if (foExcess) foLines.push(`超過分: ${foExcess}`);
+  }
+  const salaryValue = [salSummary, salDetailsText, ...foLines].filter(Boolean).join("\n");
+
+  // 時間外労働: 固定残業代と同一内容が賃金に含まれている場合は時間外を空にする
+  const overtimeDisplay = (!foAllEmpty && overtimeText) ? "" : overtimeText;
 
   // -----------------------------------------------------------------------
   // 行データ構築（Canonical Key使用、空欄非表示）
+  // 固定残業代は賃金欄に集約済みのため独立行は出さない
   // -----------------------------------------------------------------------
   const rowData: Record<string, string> = {
     "業務内容": applyRenderFormatting(formatBullets(buildJobBlock(job.job))),
@@ -318,14 +328,11 @@ const renderJobDocxFromScratch = async (
     "契約期間": job.position.contractTerm ?? "",
     "試用期間": job.position.probation ?? "",
     "就業場所": formatPostalCodeLineBreak(applyRenderFormatting(job.work.location ?? "")),
-    "就業時間": job.work.hours ?? "",
+    "就業時間": applyRenderFormatting(job.work.hours ?? ""),
     "休憩時間": job.work.breakTime ?? "",
     "休日休暇": applyRenderFormatting(job.work.holidays ?? ""),
-    "時間外労働": overtimeText,
+    "時間外労働": overtimeDisplay,
     "賃金": salaryValue,
-    "固定残業代（金額）": foAllEmpty ? "" : foAmount,
-    "固定残業代（時間数）": foAllEmpty ? "" : foHours,
-    "超過分の扱い": foAllEmpty ? "" : foExcess,
     "社会保険": job.insurance.socialInsurance ?? "",
     "福利厚生": applyRenderFormatting(listToText(job.benefits.items)),
     "選考プロセス": job.selection.process ?? ""
@@ -458,16 +465,15 @@ export const renderJobDocx = async (
 
   const fo = job.salary.fixedOvertime;
   const showFO = opts?.showFixedOvertime !== false && fo;
-  const fixedOvertimeText = showFO
-    ? [
-        fo.amount ? `金額: ${fo.amount}` : "",
-        fo.includedHours ? `時間数: ${fo.includedHours}` : "",
-        fo.excessPayment ? `超過分: ${fo.excessPayment}` : "",
-        fo.notes
-      ]
-        .filter(Boolean)
-        .join("\n")
-    : "";
+  // 固定残業代は賃金欄に統合（テンプレモードも同様）
+  const foLines: string[] = [];
+  if (showFO) {
+    if (fo.amount?.trim()) foLines.push(`固定残業代: ${fo.amount.trim()}`);
+    if (fo.includedHours?.trim()) foLines.push(`固定残業時間数: ${fo.includedHours.trim()}`);
+    if (fo.excessPayment?.trim()) foLines.push(`超過分: ${fo.excessPayment.trim()}`);
+    if (fo.notes?.trim()) foLines.push(fo.notes.trim());
+  }
+  const hasFO = foLines.length > 0;
 
   const overtimeText = job.work.overtime
     ? job.work.overtime.details
@@ -476,6 +482,12 @@ export const renderJobDocx = async (
         ? "あり"
         : ""
     : "";
+  // 固定残業代が賃金に含まれる場合、時間外労働欄は空にする（重複防止）
+  const templateOvertimeText = hasFO ? "" : overtimeText;
+
+  const salSummaryTpl = applyRenderFormatting(job.salary.summary);
+  const salDetailsTpl = applyRenderFormatting(listToText(job.salary.details));
+  const salaryFullTpl = [salSummaryTpl, salDetailsTpl, ...foLines].filter(Boolean).join("\n");
 
   const companyDisplayName = job.company.displayName ?? job.company.name;
   const data = {
@@ -491,15 +503,15 @@ export const renderJobDocx = async (
     },
     work: {
       location: formatPostalCodeLineBreak(applyRenderFormatting(job.work.location ?? "")),
-      hours: job.work.hours ?? "",
+      hours: applyRenderFormatting(job.work.hours ?? ""),
       breakTime: job.work.breakTime ?? "",
       holidays: applyRenderFormatting(job.work.holidays ?? ""),
-      overtime_text: overtimeText
+      overtime_text: templateOvertimeText
     },
     salary: {
-      summary: applyRenderFormatting(job.salary.summary),
-      details_text: applyRenderFormatting(listToText(job.salary.details)),
-      fixedOvertime_text: fixedOvertimeText
+      summary: salaryFullTpl,
+      details_text: "",
+      fixedOvertime_text: ""
     },
     insurance: { socialInsurance: job.insurance.socialInsurance ?? "" },
     benefits: { items_text: applyRenderFormatting(listToText(job.benefits.items)) },
