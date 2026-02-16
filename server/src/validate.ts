@@ -65,16 +65,24 @@ export type FaithfulnessResult = {
  * job.json 内の各フィールド（文字列/配列）を再帰走査し、
  * 空でない value が rawMd に部分一致で存在するか検証する。
  * 見つからない value があれば ok=false。
+ *
+ * @param additionalExcluded  追加の除外パス（company_overrides / company_static で
+ *                            注入されたフィールドを faithfulness 対象外にするため）
  */
 export const faithfulnessCheck = (
   job: JobPosting,
-  rawMd: string
+  rawMd: string,
+  additionalExcluded?: string[]
 ): FaithfulnessResult => {
   const missing: FaithfulnessMissing[] = [];
   const normalizedRaw = normalize(rawMd);
 
+  const allExcluded = additionalExcluded && additionalExcluded.length > 0
+    ? [...EXCLUDED_PREFIXES, ...additionalExcluded]
+    : EXCLUDED_PREFIXES;
+
   const check = (fieldPath: string, value: string) => {
-    if (isExcluded(fieldPath)) return;
+    if (allExcluded.some((prefix) => fieldPath === prefix || fieldPath.startsWith(prefix))) return;
     const v = normalize(value);
     if (!v) return; // 空値はスキップ
     if (normalizedRaw.includes(v)) return; // 部分一致OK

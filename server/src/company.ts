@@ -70,6 +70,11 @@ export const clearAliasCache = (): void => {
 //    server/data/company_static/<company_key>.json を読み込んで merge する。
 //    enabled=false のときは絶対に何もしない（出力影響ゼロ）。
 // ---------------------------------------------------------------------------
+// D) company_overrides.json — 例外定義（定型差し込み）
+//    server/config/company_overrides.json を読み込み、
+//    company_key に一致するエントリの fields を欠落項目にのみ注入する。
+//    根拠（source URL）を明記することで「原文忠実」の例外を許可する。
+// ---------------------------------------------------------------------------
 
 const COMPANY_STATIC_DIR = path.resolve(process.cwd(), "data", "company_static");
 
@@ -207,5 +212,116 @@ export const mergeCompanyStatic = (
     provenance,
     staticApplied: staticAppliedKeys.length > 0,
     staticAppliedKeys,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// D) company_overrides.json — 例外定義（定型差し込み）
+// ---------------------------------------------------------------------------
+
+const OVERRIDES_PATH = path.resolve(process.cwd(), "config", "company_overrides.json");
+
+export type CompanyOverrideSource = {
+  name: string;
+  url: string;
+};
+
+export type CompanyOverrideEntry = {
+  source: CompanyOverrideSource;
+  fields: Record<string, string | string[]>;
+};
+
+type OverridesConfig = Record<string, CompanyOverrideEntry>;
+
+let overridesCache: OverridesConfig | null = null;
+
+const loadOverridesConfig = (): OverridesConfig => {
+  if (overridesCache) return overridesCache;
+  try {
+    const raw = fs.readFileSync(OVERRIDES_PATH, "utf8");
+    overridesCache = JSON.parse(raw) as OverridesConfig;
+  } catch {
+    overridesCache = {};
+  }
+  return overridesCache;
+};
+
+export const clearOverridesCache = (): void => {
+  overridesCache = null;
+};
+
+export type OverrideResult = {
+  applied: boolean;
+  appliedFields: string[];
+  source: CompanyOverrideSource | null;
+};
+
+/**
+ * company_overrides.json から定型データを読み込み、
+ * 欠落しているフィールドのみ job に差し込む（上書き禁止）。
+ *
+ * 差し込み対象: work.hours / work.holidays / benefits.items /
+ *              insurance.socialInsurance / selection.process
+ *
+ * @returns OverrideResult: applied flag + appliedFields（faithfulness 除外リスト用）
+ */
+export const applyCompanyOverrides = (
+  job: JobPosting,
+  companyKey: string | null
+): OverrideResult => {
+  if (!companyKey) return { applied: false, appliedFields: [], source: null };
+
+  const config = loadOverridesConfig();
+  const entry = config[companyKey];
+  if (!entry?.fields) return { applied: false, appliedFields: [], source: null };
+
+  const appliedFields: string[] = [];
+  const f = entry.fields;
+
+  // work.hours
+  if (typeof f["work.hours"] === "string" && f["work.hours"].trim()) {
+    if (!isNonEmpty(job.work.hours)) {
+      job.work.hours = f["work.hours"];
+      appliedFields.push("work.hours");
+    }
+  }
+
+  // work.holidays
+  if (typeof f["work.holidays"] === "string" && f["work.holidays"].trim()) {
+    if (!isNonEmpty(job.work.holidays)) {
+      job.work.holidays = f["work.holidays"];
+      appliedFields.push("work.holidays");
+    }
+  }
+
+  // benefits.items
+  if (Array.isArray(f["benefits.items"])) {
+    const overrideItems = f["benefits.items"].filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+    if (overrideItems.length > 0 && !isNonEmptyArray(job.benefits.items)) {
+      job.benefits.items = overrideItems;
+      appliedFields.push("benefits.items");
+    }
+  }
+
+  // insurance.socialInsurance
+  if (typeof f["insurance.socialInsurance"] === "string" && f["insurance.socialInsurance"].trim()) {
+    if (!isNonEmpty(job.insurance.socialInsurance)) {
+      job.insurance.socialInsurance = f["insurance.socialInsurance"];
+      appliedFields.push("insurance.socialInsurance");
+    }
+  }
+
+  // selection.process
+  if (typeof f["selection.process"] === "string" && f["selection.process"].trim()) {
+    if (!isNonEmpty(job.selection.process)) {
+      job.selection.process = f["selection.process"];
+      appliedFields.push("selection.process");
+    }
+  }
+
+  return {
+    applied: appliedFields.length > 0,
+    appliedFields,
+    source: entry.source ?? null,
   };
 };

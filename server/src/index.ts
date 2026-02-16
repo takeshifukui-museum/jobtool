@@ -22,7 +22,9 @@ import {
   normalizeCompanyName,
   resolveCompanyKey,
   mergeCompanyStatic,
+  applyCompanyOverrides,
   type MergeResult,
+  type OverrideResult,
 } from "./company.js";
 
 const ENABLE_COMPANY_STATIC = process.env.ENABLE_COMPANY_STATIC === "true" || process.env.ENABLE_COMPANY_STATIC === "1";
@@ -659,15 +661,31 @@ app.post("/api/structure", async (req, res) => {
     // (2.7) 【歓迎】マーカーチェック: 原文に無い歓迎スキルは除去
     stripUnfoundedWant(sanitized, normalizedText, warnings);
 
-    // (2.8) company_key 解決 + 企業定型ブロックマージ
+    // (2.8) company_key 解決 + 例外定義（overrides）差し込み + 企業定型ブロックマージ
     const companyKey = resolveCompanyKey(sanitized.company.name);
     if (companyKey) {
       log("company", `company_key 解決: "${sanitized.company.name}" → "${companyKey}"`);
     }
+
+    // D) company_overrides.json の定型差し込み（overrides 優先 → company_static は残りを埋める）
+    const overrideResult = applyCompanyOverrides(sanitized, companyKey);
+    if (overrideResult.applied) {
+      log("company", "company_overrides 定型差し込み", {
+        keys: overrideResult.appliedFields,
+        source: overrideResult.source?.name,
+      });
+    }
+
     const mergeResult = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
     if (mergeResult.staticApplied) {
       log("company", "company_static 注入", { keys: mergeResult.staticAppliedKeys });
     }
+
+    // 注入されたフィールドの一覧（faithfulness 除外用）
+    const injectedFields = [
+      ...overrideResult.appliedFields,
+      ...mergeResult.staticAppliedKeys,
+    ];
 
     // 時間外労働: 情報が無い場合は項目自体を削除
     if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
@@ -706,6 +724,7 @@ app.post("/api/structure", async (req, res) => {
     }
 
     // (5) 真の必須欠落チェック（停止条件）— 業務内容/勤務地/賃金
+    //     overrides / company_static 適用後に判定（埋まっていれば通過）
     const reqResult = requiredFieldsCheck(sanitized);
     if (!reqResult.ok) {
       saveMissingRequiredReport(artifactDir, reqResult, warnings);
@@ -727,28 +746,18 @@ app.post("/api/structure", async (req, res) => {
       log("structure", "任意項目欠落（停止なし）", { missing: optResult.warnings });
     }
 
-    // (6) faithfulness チェック（デフォルト: 警告のみ。STRICT_NO_PARAPHRASE=true で停止）
-    const faithResult = faithfulnessCheck(sanitized, normalizedText);
+    // (6) faithfulness チェック（常に警告のみ — 停止しない）
+    //     overrides / company_static で注入したフィールドは除外
+    const faithResult = faithfulnessCheck(sanitized, normalizedText, injectedFields);
     const faithErrors = toFaithfulnessErrors(faithResult);
 
     if (!faithResult.ok) {
-      log("structure", "言い換え検出", { count: faithResult.missing.length });
+      log("structure", "言い換え検出（警告）", { count: faithResult.missing.length });
 
       // paraphrase_report.json を必ず保存（根拠を残す）
       saveParaphraseReport(artifactDir, faithResult);
 
-      if (STRICT_NO_PARAPHRASE) {
-        // 厳格モード: 1件でも停止
-        return res.status(400).json({
-          error: {
-            code: "FAITHFULNESS_VIOLATION",
-            message: `原文と異なる表現が検出されました（${faithResult.missing.length}件）。STRICT_NO_PARAPHRASE=true のため停止。`,
-            missing: faithResult.missing,
-          },
-        });
-      }
-
-      // デフォルト: 警告として記録し処理続行
+      // 警告として記録し処理続行（停止しない）
       warnings.push(`PARAPHRASE_WARNING: 原文と異なる表現の可能性（${faithResult.missing.length}件）。詳細は paraphrase_report.json を確認してください。`);
     }
 
@@ -782,12 +791,18 @@ app.post("/api/structure", async (req, res) => {
       }
     }
 
-    // (8) 成果物保存（static_applied は job.json に内部メタとして追加）
+    // (8) 成果物保存（static_applied / overrides_applied は job.json に内部メタとして追加）
     const structuredMd = buildStructuredMarkdown(sanitized, normalizedText);
 
-    const jobWithMeta = mergeResult.staticApplied
-      ? { ...sanitized, static_applied: true, static_applied_keys: mergeResult.staticAppliedKeys }
-      : sanitized;
+    const jobWithMeta: Record<string, unknown> = { ...sanitized };
+    if (mergeResult.staticApplied) {
+      jobWithMeta.static_applied = true;
+      jobWithMeta.static_applied_keys = mergeResult.staticAppliedKeys;
+    }
+    if (overrideResult.applied) {
+      jobWithMeta.overrides_applied = true;
+      jobWithMeta.overrides_applied_keys = overrideResult.appliedFields;
+    }
     fs.writeFileSync(path.join(finalDir, "job.json"), JSON.stringify(jobWithMeta, null, 2), "utf8");
     fs.writeFileSync(path.join(finalDir, "job_structured.md"), structuredMd, "utf8");
 
@@ -802,6 +817,9 @@ app.post("/api/structure", async (req, res) => {
       companyName: sanitized.company.name,
       companyKey: companyKey ?? undefined,
       provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
+      overridesApplied: overrideResult.applied
+        ? { fields: overrideResult.appliedFields, source: overrideResult.source }
+        : undefined,
       positionTitle: sanitized.position.title,
       jobTitle,
       structuredAt: new Date().toISOString(),
@@ -950,23 +968,32 @@ app.post("/api/render", async (req, res) => {
       });
     }
 
-    // faithfulness チェック（render 前最終防衛）
-    // デフォルト: 警告のみ。STRICT_NO_PARAPHRASE=true の場合のみ停止。
+    // faithfulness チェック（render 前最終防衛 — 常に警告のみ、停止しない）
+    // overrides / company_static で注入したフィールドは除外
     let showFixedOvertime = true;
     try {
       const rawMd = fs.readFileSync(path.join(artifactDir, "job_raw.md"), "utf8");
-      const faithResult = faithfulnessCheck(sanitized, rawMd);
+
+      // meta.json から注入済みフィールドを取得（faithfulness 除外用）
+      let renderInjectedFields: string[] = [];
+      try {
+        const metaForRender = JSON.parse(fs.readFileSync(path.join(artifactDir, "meta.json"), "utf8"));
+        if (metaForRender.overridesApplied?.fields) {
+          renderInjectedFields.push(...metaForRender.overridesApplied.fields);
+        }
+        if (metaForRender.provenance) {
+          for (const [field, source] of Object.entries(metaForRender.provenance)) {
+            if (source === "company_static" && !renderInjectedFields.includes(field)) {
+              renderInjectedFields.push(field);
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      const faithResult = faithfulnessCheck(sanitized, rawMd, renderInjectedFields);
       if (!faithResult.ok) {
         saveParaphraseReport(artifactDir, faithResult);
-        if (STRICT_NO_PARAPHRASE) {
-          return res.status(400).json({
-            error: {
-              code: "FAITHFULNESS_VIOLATION",
-              message: `原文と異なる表現が検出されました（${faithResult.missing.length}件）。STRICT_NO_PARAPHRASE=true のため停止。`,
-              missing: faithResult.missing,
-            },
-          });
-        }
+        log("render", "言い換え検出（警告のみ）", { count: faithResult.missing.length });
       }
       showFixedOvertime = hasFixedOvertimeKeywords(rawMd);
     } catch { /* job_raw.md が無ければスキップ */ }
@@ -1123,15 +1150,31 @@ app.post("/api/generate", async (req, res) => {
     // 【歓迎】マーカーチェック
     stripUnfoundedWant(sanitized, normalized, warnings);
 
-    // company_key 解決 + 企業定型ブロックマージ
+    // company_key 解決 + 例外定義（overrides）差し込み + 企業定型ブロックマージ
     const companyKey = resolveCompanyKey(sanitized.company.name);
     if (companyKey) {
       log("company", `company_key 解決: "${sanitized.company.name}" → "${companyKey}"`);
     }
+
+    // D) company_overrides.json の定型差し込み（overrides 優先 → company_static は残りを埋める）
+    const overrideResult = applyCompanyOverrides(sanitized, companyKey);
+    if (overrideResult.applied) {
+      log("company", "company_overrides 定型差し込み", {
+        keys: overrideResult.appliedFields,
+        source: overrideResult.source?.name,
+      });
+    }
+
     const mergeResult = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
     if (mergeResult.staticApplied) {
       log("company", "company_static 注入", { keys: mergeResult.staticAppliedKeys });
     }
+
+    // 注入されたフィールドの一覧（faithfulness 除外用）
+    const injectedFields = [
+      ...overrideResult.appliedFields,
+      ...mergeResult.staticAppliedKeys,
+    ];
 
     if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
       delete sanitized.work.overtime;
@@ -1198,6 +1241,7 @@ app.post("/api/generate", async (req, res) => {
     }
 
     // 真の必須欠落チェック — 業務内容/勤務地/賃金のみ停止
+    //   overrides / company_static 適用後に判定（埋まっていれば通過）
     const reqResult = requiredFieldsCheck(sanitized);
     if (!reqResult.ok) {
       saveMissingRequiredReport(artifactDir, reqResult, warnings);
@@ -1219,27 +1263,18 @@ app.post("/api/generate", async (req, res) => {
       log("generate", "任意項目欠落（停止なし）", { missing: optResult.warnings });
     }
 
-    // faithfulness チェック（デフォルト: 警告のみ。STRICT_NO_PARAPHRASE=true で停止）
-    const faithResult = faithfulnessCheck(sanitized, normalized);
+    // faithfulness チェック（常に警告のみ — 停止しない）
+    //   overrides / company_static で注入したフィールドは除外
+    const faithResult = faithfulnessCheck(sanitized, normalized, injectedFields);
     const faithErrors = toFaithfulnessErrors(faithResult);
 
     if (!faithResult.ok) {
-      log("generate", "言い換え検出", { count: faithResult.missing.length });
+      log("generate", "言い換え検出（警告）", { count: faithResult.missing.length });
 
       // paraphrase_report.json を必ず保存
       saveParaphraseReport(artifactDir, faithResult);
 
-      if (STRICT_NO_PARAPHRASE) {
-        return res.status(400).json({
-          error: {
-            code: "FAITHFULNESS_VIOLATION",
-            message: `原文と異なる表現が検出されました（${faithResult.missing.length}件）。STRICT_NO_PARAPHRASE=true のため停止。`,
-            missing: faithResult.missing,
-          },
-        });
-      }
-
-      // デフォルト: 警告として記録し処理続行
+      // 警告として記録し処理続行（停止しない）
       warnings.push(`PARAPHRASE_WARNING: 原文と異なる表現の可能性（${faithResult.missing.length}件）。詳細は paraphrase_report.json を確認してください。`);
     }
 
@@ -1252,9 +1287,15 @@ app.post("/api/generate", async (req, res) => {
     const structuredMd = buildStructuredMarkdown(sanitized, normalized);
     fs.writeFileSync(path.join(artifactDir, "job_structured.md"), structuredMd, "utf8");
 
-    const jobWithMeta = mergeResult.staticApplied
-      ? { ...sanitized, static_applied: true, static_applied_keys: mergeResult.staticAppliedKeys }
-      : sanitized;
+    const jobWithMeta: Record<string, unknown> = { ...sanitized };
+    if (mergeResult.staticApplied) {
+      jobWithMeta.static_applied = true;
+      jobWithMeta.static_applied_keys = mergeResult.staticAppliedKeys;
+    }
+    if (overrideResult.applied) {
+      jobWithMeta.overrides_applied = true;
+      jobWithMeta.overrides_applied_keys = overrideResult.appliedFields;
+    }
     fs.writeFileSync(path.join(artifactDir, "job.json"), JSON.stringify(jobWithMeta, null, 2), "utf8");
 
     const meta = {
@@ -1271,6 +1312,9 @@ app.post("/api/generate", async (req, res) => {
       companyName: sanitized.company.name,
       companyKey: companyKey ?? undefined,
       provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
+      overridesApplied: overrideResult.applied
+        ? { fields: overrideResult.appliedFields, source: overrideResult.source }
+        : undefined,
       positionTitle: sanitized.position.title,
       savedAt: new Date().toISOString(),
     };
