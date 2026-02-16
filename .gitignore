@@ -11,3 +11,6 @@ server/data/company_static/*
 node_modules/
 dist/
 build/
+server/.env.txt
+extension/*.bak_*
+package-lock.json
