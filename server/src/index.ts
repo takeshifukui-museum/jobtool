@@ -26,6 +26,7 @@ import {
   getDisplayCompanyName,
   mergeCompanyStatic,
   applyCompanyDefaults,
+  loadFieldAliases,
   type MergeResult,
   type DefaultsResult,
 } from "./company.js";
@@ -40,6 +41,31 @@ const STRICT_NO_PARAPHRASE = process.env.STRICT_NO_PARAPHRASE === "true" || proc
 
 const log = (tag: string, msg: string, data?: Record<string, unknown>) => {
   console.log(`[${tag}] ${msg}`, data ?? "");
+};
+
+// ---------------------------------------------------------------------------
+// ネストされたオブジェクトの値取得/設定 (dot-path: "work.location" 等)
+// ---------------------------------------------------------------------------
+const getNestedValue = (obj: Record<string, unknown>, dotPath: string): unknown => {
+  const parts = dotPath.split(".");
+  let current: unknown = obj;
+  for (const part of parts) {
+    if (current == null || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+};
+
+const setNestedValue = (obj: Record<string, unknown>, dotPath: string, value: unknown): void => {
+  const parts = dotPath.split(".");
+  let current: Record<string, unknown> = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (current[parts[i]] == null || typeof current[parts[i]] !== "object") {
+      current[parts[i]] = {};
+    }
+    current = current[parts[i]] as Record<string, unknown>;
+  }
+  current[parts[parts.length - 1]] = value;
 };
 
 // ---------------------------------------------------------------------------
@@ -513,7 +539,7 @@ app.use(express.json({ limit: "4mb" }));
 // ===========================================================================
 app.post("/api/extract", async (req, res) => {
   try {
-    const { rawText, rawHtml, url, title, siteHint, extractMeta, runId: inputRunId } = req.body ?? {};
+    const { rawText, rawHtml, url, title, siteHint, extractMeta, extractedSections, extractionTrace, runId: inputRunId } = req.body ?? {};
 
     if (!rawText || String(rawText).trim() === "") {
       return res.status(400).json({
@@ -565,6 +591,16 @@ app.post("/api/extract", async (req, res) => {
       fs.writeFileSync(path.join(artifactDir, "job_raw.html"), rawHtml, "utf8");
     }
 
+    // extracted_sections.json（DOM由来のセクション化データ）
+    if (Array.isArray(extractedSections) && extractedSections.length > 0) {
+      fs.writeFileSync(
+        path.join(artifactDir, "extracted_sections.json"),
+        JSON.stringify({ sections: extractedSections, trace: extractionTrace ?? null }, null, 2),
+        "utf8"
+      );
+      log("extract", `DOM sections saved: ${extractedSections.length}件`, { strategy: extractionTrace?.strategy });
+    }
+
     // extract_report.json
     const report = {
       url: url || null,
@@ -573,6 +609,8 @@ app.post("/api/extract", async (req, res) => {
       extractMeta: extractMeta ?? null,
       extractedLength,
       minExtractedChars: MIN_EXTRACTED_CHARS,
+      extractionTrace: extractionTrace ?? null,
+      sectionCount: Array.isArray(extractedSections) ? extractedSections.length : 0,
       timestamp: new Date().toISOString(),
     };
     fs.writeFileSync(path.join(artifactDir, "extract_report.json"), JSON.stringify(report, null, 2), "utf8");
@@ -585,6 +623,8 @@ app.post("/api/extract", async (req, res) => {
       title: title || undefined,
       siteHint: siteHint || undefined,
       extractedLength,
+      extractionStrategy: extractionTrace?.strategy,
+      sectionCount: Array.isArray(extractedSections) ? extractedSections.length : 0,
       savedAt: new Date().toISOString(),
     };
     fs.writeFileSync(path.join(artifactDir, "meta.json"), JSON.stringify(meta, null, 2), "utf8");
@@ -661,6 +701,55 @@ app.post("/api/structure", async (req, res) => {
     // (2.5) evidence 検証: rawText 内に根拠が無い項目を無効化
     const evidenceResult = validateEvidence(sanitized, normalizedText);
     const warnings: string[] = [...evidenceResult.warnings];
+
+    // (2.5b) DOM sections によるフィールド補完 + ソース追跡
+    const fieldSourceLog: Array<{ field: string; source: string; label?: string; snippet?: string }> = [];
+    try {
+      const sectionsPath = path.join(artifactDir, "extracted_sections.json");
+      if (fs.existsSync(sectionsPath)) {
+        const sectionsData = JSON.parse(fs.readFileSync(sectionsPath, "utf8"));
+        const domSections: Array<{ label: string; value: string; domTag?: string; snippet?: string }> = sectionsData.sections ?? [];
+        if (domSections.length > 0) {
+          const aliases = loadFieldAliases();
+          for (const sec of domSections) {
+            const canonicalField = aliases[sec.label] ?? null;
+            if (!canonicalField) continue;
+
+            // HRMOS: selection.process は DOM sections からのみ許可
+            if (canonicalField === "selection.process" && siteHint === "HRMOS") {
+              // DOM section にある場合のみ、値があれば設定
+              if (!sanitized.selection.process?.trim() && sec.value.trim()) {
+                sanitized.selection.process = sec.value.trim();
+                fieldSourceLog.push({ field: "selection.process", source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
+                log("field_source", `selection.process source=sections label=${sec.label}`, { snippet: sec.value.slice(0, 120) });
+              }
+              continue;
+            }
+
+            // 汎用: OpenAI が抽出できなかったフィールドを sections で補完
+            const current = getNestedValue(sanitized, canonicalField);
+            if (!current || (typeof current === "string" && !current.trim())) {
+              setNestedValue(sanitized, canonicalField, sec.value.trim());
+              fieldSourceLog.push({ field: canonicalField, source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
+              log("field_source", `${canonicalField} source=sections label=${sec.label}`, { snippet: sec.value.slice(0, 120) });
+            } else {
+              fieldSourceLog.push({ field: canonicalField, source: "openai", snippet: (typeof current === "string" ? current : "").slice(0, 120) });
+            }
+          }
+
+          // HRMOS: selection.process が rawText 由来で誤抽出の可能性がある場合はクリア
+          if (siteHint === "HRMOS" && sanitized.selection.process?.trim()) {
+            const fromSections = fieldSourceLog.some((l) => l.field === "selection.process" && l.source === "sections");
+            if (!fromSections) {
+              log("field_source", "selection.process cleared (HRMOS: not from DOM sections)");
+              sanitized.selection.process = "";
+            }
+          }
+        }
+      }
+    } catch (e) {
+      log("field_source", "extracted_sections.json の読み込みエラー（無視して続行）", { error: String(e) });
+    }
 
     // (2.6) 企業名の正規化（トリムのみ。ハードコード辞書は廃止済み）
     applyCompanyNameNormalization(sanitized);
@@ -842,6 +931,7 @@ app.post("/api/structure", async (req, res) => {
       injected: defaultsResult.applied
         ? { fields: defaultsResult.appliedFields, sources: defaultsResult.sources, sourceUrl: defaultsResult.sourceUrl }
         : undefined,
+      fieldSourceLog: fieldSourceLog.length > 0 ? fieldSourceLog : undefined,
       positionTitle: sanitized.position.title,
       jobTitle,
       structuredAt: new Date().toISOString(),
@@ -1116,7 +1206,7 @@ app.post("/api/render", async (req, res) => {
 // ===========================================================================
 app.post("/api/generate", async (req, res) => {
   try {
-    const { url, title, rawText, rawHtml, siteHint, jobTitle, extractMeta } = req.body ?? {};
+    const { url, title, rawText, rawHtml, siteHint, jobTitle, extractMeta, extractedSections: genSections, extractionTrace: genTrace } = req.body ?? {};
 
     // --- extract 相当 ---
     if (!rawText || String(rawText).trim() === "") {
@@ -1165,6 +1255,36 @@ app.post("/api/generate", async (req, res) => {
     // evidence 検証: rawText 内に根拠が無い項目を無効化
     const evidenceResult = validateEvidence(sanitized, normalized);
     const warnings: string[] = [...evidenceResult.warnings];
+
+    // DOM sections によるフィールド補完（generate経路）
+    const genFieldSourceLog: Array<{ field: string; source: string; label?: string; snippet?: string }> = [];
+    const genSiteHint = String(siteHint ?? "unknown");
+    if (Array.isArray(genSections) && genSections.length > 0) {
+      const aliases = loadFieldAliases();
+      for (const sec of genSections) {
+        const canonicalField = aliases[sec.label] ?? null;
+        if (!canonicalField) continue;
+        if (canonicalField === "selection.process" && genSiteHint === "HRMOS") {
+          if (!sanitized.selection.process?.trim() && sec.value?.trim()) {
+            sanitized.selection.process = sec.value.trim();
+            genFieldSourceLog.push({ field: "selection.process", source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
+          }
+          continue;
+        }
+        const current = getNestedValue(sanitized as unknown as Record<string, unknown>, canonicalField);
+        if (!current || (typeof current === "string" && !current.trim())) {
+          setNestedValue(sanitized as unknown as Record<string, unknown>, canonicalField, sec.value.trim());
+          genFieldSourceLog.push({ field: canonicalField, source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
+          log("field_source", `${canonicalField} source=sections label=${sec.label}`, { snippet: sec.value.slice(0, 120) });
+        }
+      }
+      if (genSiteHint === "HRMOS" && sanitized.selection.process?.trim()) {
+        const fromSections = genFieldSourceLog.some((l) => l.field === "selection.process" && l.source === "sections");
+        if (!fromSections) {
+          sanitized.selection.process = "";
+        }
+      }
+    }
 
     // 企業名の正規化（トリムのみ）
     applyCompanyNameNormalization(sanitized);

@@ -110,7 +110,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           url: payload.url,
           title: payload.title,
           siteHint: payload.siteHint,
-          extractMeta: payload.extractMeta
+          extractMeta: payload.extractMeta,
+          extractedSections: payload.extractedSections,
+          extractionTrace: payload.extractionTrace
         });
 
         const structureResult = await apiPost(API_STRUCTURE, { runId: extractResult.runId });
