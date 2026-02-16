@@ -18,8 +18,10 @@ export const normalizeCompanyName = (name: string): string => {
 // ---------------------------------------------------------------------------
 // B) company_alias.json → company_key 解決
 //    server/data/company_alias.json を起動時に読み込み、逆引きマップを構築。
-//    { "sega_group": ["セガ","株式会社セガ",...] }
-//    → { "セガ": "sega_group", "株式会社セガ": "sega_group", ... }
+//    { "sega": ["セガ","株式会社セガ"], "sega_sapporo_studio": [...], ... }
+//    → { "セガ": "sega", "株式会社セガ": "sega", ... }
+//    完全一致で解決できない場合は company_profiles._resolveHints で
+//    部分一致（contains）ルールを試行する。
 // ---------------------------------------------------------------------------
 
 const ALIAS_PATH = path.resolve(process.cwd(), "data", "company_alias.json");
@@ -69,11 +71,7 @@ export const clearAliasCache = (): void => {
 // C) 企業別定型ブロック差し込み（一般化・デフォルトOFF・上書き禁止）
 //    server/data/company_static/<company_key>.json を読み込んで merge する。
 //    enabled=false のときは絶対に何もしない（出力影響ゼロ）。
-// ---------------------------------------------------------------------------
-// D) company_overrides.json — 例外定義（定型差し込み）
-//    server/config/company_overrides.json を読み込み、
-//    company_key に一致するエントリの fields を欠落項目にのみ注入する。
-//    根拠（source URL）を明記することで「原文忠実」の例外を許可する。
+//    ※ company_profiles.json (D) が優先。static は下位互換として残す。
 // ---------------------------------------------------------------------------
 
 const COMPANY_STATIC_DIR = path.resolve(process.cwd(), "data", "company_static");
@@ -216,112 +214,169 @@ export const mergeCompanyStatic = (
 };
 
 // ---------------------------------------------------------------------------
-// D) company_overrides.json — 例外定義（定型差し込み）
+// D) company_profiles.json — 企業プロファイル（定型差し込み + 表示名）
+//    server/config/company_profiles.json を読み込み、
+//    company_key に一致するプロファイルの defaults を欠落項目にのみ注入する。
+//    差し込み対象は 4項目のみ:
+//      work.hours / work.holidays / benefits.items / insurance.socialInsurance
+//    賃金・固定残業代・雇用形態は絶対に差し込まない。
+//    根拠（sources）を明記し、job.meta.injected に記録する。
 // ---------------------------------------------------------------------------
 
-const OVERRIDES_PATH = path.resolve(process.cwd(), "config", "company_overrides.json");
+const PROFILES_PATH = path.resolve(process.cwd(), "config", "company_profiles.json");
 
-export type CompanyOverrideSource = {
-  name: string;
-  url: string;
+type ResolveHint = { contains: string; key: string };
+
+export type CompanyProfile = {
+  displayCompanyName?: string;
+  defaults: Record<string, string | string[]>;
+  sources: Record<string, string[]>;
 };
 
-export type CompanyOverrideEntry = {
-  source: CompanyOverrideSource;
-  fields: Record<string, string | string[]>;
-};
+type ProfilesConfig = {
+  _resolveHints?: ResolveHint[];
+} & Record<string, CompanyProfile>;
 
-type OverridesConfig = Record<string, CompanyOverrideEntry>;
+let profilesCache: ProfilesConfig | null = null;
 
-let overridesCache: OverridesConfig | null = null;
-
-const loadOverridesConfig = (): OverridesConfig => {
-  if (overridesCache) return overridesCache;
+const loadProfilesConfig = (): ProfilesConfig => {
+  if (profilesCache) return profilesCache;
   try {
-    const raw = fs.readFileSync(OVERRIDES_PATH, "utf8");
-    overridesCache = JSON.parse(raw) as OverridesConfig;
+    const raw = fs.readFileSync(PROFILES_PATH, "utf8");
+    profilesCache = JSON.parse(raw) as ProfilesConfig;
   } catch {
-    overridesCache = {};
+    profilesCache = {} as ProfilesConfig;
   }
-  return overridesCache;
+  return profilesCache;
 };
 
-export const clearOverridesCache = (): void => {
-  overridesCache = null;
-};
-
-export type OverrideResult = {
-  applied: boolean;
-  appliedFields: string[];
-  source: CompanyOverrideSource | null;
+export const clearProfilesCache = (): void => {
+  profilesCache = null;
 };
 
 /**
- * company_overrides.json から定型データを読み込み、
- * 欠落しているフィールドのみ job に差し込む（上書き禁止）。
- *
- * 差し込み対象: work.hours / work.holidays / benefits.items /
- *              insurance.socialInsurance / selection.process
- *
- * @returns OverrideResult: applied flag + appliedFields（faithfulness 除外リスト用）
+ * company_alias.json の完全一致で解決できなかった場合のフォールバック。
+ * _resolveHints の contains ルールで部分一致を試行する。
+ * 先に定義されたルールが優先（より具体的なキーを先に並べる）。
  */
-export const applyCompanyOverrides = (
+export const resolveCompanyKeyWithHints = (companyName: string): string | null => {
+  const config = loadProfilesConfig();
+  const hints = config._resolveHints;
+  if (!hints || !Array.isArray(hints)) return null;
+  const name = companyName.trim();
+  for (const hint of hints) {
+    if (name.includes(hint.contains)) {
+      return hint.key;
+    }
+  }
+  return null;
+};
+
+/**
+ * プロファイルの displayCompanyName を job.company.displayName に設定する。
+ * 原文の company.name は変更しない。
+ *
+ * 方針:
+ *   - 原文に「株式会社」が含まれていればそのまま（既に正式名称）
+ *   - 含まれていなければプロファイルの displayCompanyName を使用
+ */
+export const resolveDisplayName = (
   job: JobPosting,
   companyKey: string | null
-): OverrideResult => {
-  if (!companyKey) return { applied: false, appliedFields: [], source: null };
+): string | undefined => {
+  if (!companyKey) return undefined;
+  const config = loadProfilesConfig();
+  const profile = config[companyKey] as CompanyProfile | undefined;
+  if (!profile?.displayCompanyName) return undefined;
 
-  const config = loadOverridesConfig();
-  const entry = config[companyKey];
-  if (!entry?.fields) return { applied: false, appliedFields: [], source: null };
+  const originalName = job.company.name?.trim() ?? "";
+  // 既に正式法人名を含んでいる場合はそのまま維持
+  if (originalName.includes("株式会社") || originalName.includes("有限会社")) {
+    job.company.displayName = originalName;
+    return originalName;
+  }
+  job.company.displayName = profile.displayCompanyName;
+  return profile.displayCompanyName;
+};
+
+// ---------------------------------------------------------------------------
+// E) applyCompanyDefaults — プロファイルからの定型差し込み（4項目限定）
+// ---------------------------------------------------------------------------
+
+export type DefaultsResult = {
+  applied: boolean;
+  appliedFields: string[];
+  sources: Record<string, string[]>;
+};
+
+/**
+ * company_profiles.json の defaults を job に差し込む。
+ *
+ * 【絶対原則】
+ *  - 対象は 4項目のみ: work.hours / work.holidays / benefits.items / insurance.socialInsurance
+ *  - 賃金・固定残業代・雇用形態は絶対に差し込まない
+ *  - 既に値がある場合は絶対に上書きしない
+ *  - 差し込み根拠（sources）を返す
+ */
+export const applyCompanyDefaults = (
+  job: JobPosting,
+  companyKey: string | null
+): DefaultsResult => {
+  const empty: DefaultsResult = { applied: false, appliedFields: [], sources: {} };
+  if (!companyKey) return empty;
+
+  const config = loadProfilesConfig();
+  const profile = config[companyKey] as CompanyProfile | undefined;
+  if (!profile?.defaults) return empty;
 
   const appliedFields: string[] = [];
-  const f = entry.fields;
+  const appliedSources: Record<string, string[]> = {};
+  const d = profile.defaults;
+  const s = profile.sources ?? {};
 
-  // work.hours
-  if (typeof f["work.hours"] === "string" && f["work.hours"].trim()) {
+  // 1) work.hours
+  if (typeof d["work.hours"] === "string" && d["work.hours"].trim()) {
     if (!isNonEmpty(job.work.hours)) {
-      job.work.hours = f["work.hours"];
+      job.work.hours = d["work.hours"];
       appliedFields.push("work.hours");
+      if (s["work.hours"]) appliedSources["work.hours"] = s["work.hours"];
     }
   }
 
-  // work.holidays
-  if (typeof f["work.holidays"] === "string" && f["work.holidays"].trim()) {
+  // 2) work.holidays
+  if (typeof d["work.holidays"] === "string" && d["work.holidays"].trim()) {
     if (!isNonEmpty(job.work.holidays)) {
-      job.work.holidays = f["work.holidays"];
+      job.work.holidays = d["work.holidays"];
       appliedFields.push("work.holidays");
+      if (s["work.holidays"]) appliedSources["work.holidays"] = s["work.holidays"];
     }
   }
 
-  // benefits.items
-  if (Array.isArray(f["benefits.items"])) {
-    const overrideItems = f["benefits.items"].filter((x): x is string => typeof x === "string" && x.trim().length > 0);
-    if (overrideItems.length > 0 && !isNonEmptyArray(job.benefits.items)) {
-      job.benefits.items = overrideItems;
-      appliedFields.push("benefits.items");
-    }
+  // 3) benefits.items (配列) or benefits.text (文字列→配列化)
+  const benefitsArr = Array.isArray(d["benefits.items"])
+    ? d["benefits.items"].filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+    : typeof d["benefits.text"] === "string" && d["benefits.text"].trim()
+      ? [d["benefits.text"]]
+      : [];
+  if (benefitsArr.length > 0 && !isNonEmptyArray(job.benefits.items)) {
+    job.benefits.items = benefitsArr;
+    appliedFields.push("benefits.items");
+    const bSrc = s["benefits.items"] ?? s["benefits.text"];
+    if (bSrc) appliedSources["benefits.items"] = bSrc;
   }
 
-  // insurance.socialInsurance
-  if (typeof f["insurance.socialInsurance"] === "string" && f["insurance.socialInsurance"].trim()) {
+  // 4) insurance.socialInsurance
+  if (typeof d["insurance.socialInsurance"] === "string" && d["insurance.socialInsurance"].trim()) {
     if (!isNonEmpty(job.insurance.socialInsurance)) {
-      job.insurance.socialInsurance = f["insurance.socialInsurance"];
+      job.insurance.socialInsurance = d["insurance.socialInsurance"];
       appliedFields.push("insurance.socialInsurance");
-    }
-  }
-
-  // selection.process
-  if (typeof f["selection.process"] === "string" && f["selection.process"].trim()) {
-    if (!isNonEmpty(job.selection.process)) {
-      job.selection.process = f["selection.process"];
-      appliedFields.push("selection.process");
+      if (s["insurance.socialInsurance"]) appliedSources["insurance.socialInsurance"] = s["insurance.socialInsurance"];
     }
   }
 
   return {
     applied: appliedFields.length > 0,
     appliedFields,
-    source: entry.source ?? null,
+    sources: appliedSources,
   };
 };

@@ -21,10 +21,12 @@ import {
 import {
   normalizeCompanyName,
   resolveCompanyKey,
+  resolveCompanyKeyWithHints,
+  resolveDisplayName,
   mergeCompanyStatic,
-  applyCompanyOverrides,
+  applyCompanyDefaults,
   type MergeResult,
-  type OverrideResult,
+  type DefaultsResult,
 } from "./company.js";
 
 const ENABLE_COMPANY_STATIC = process.env.ENABLE_COMPANY_STATIC === "true" || process.env.ENABLE_COMPANY_STATIC === "1";
@@ -427,7 +429,7 @@ const buildStructuredMarkdown = (job: JobPosting, rawText?: string): string => {
     `# 求人票（構造化）`,
     ``,
     `## 企業`,
-    `- 企業名: ${job.company.name || "（不明）"}`,
+    `- 企業名: ${(job.company.displayName ?? job.company.name) || "（不明）"}`,
     job.company.summary?.trim() ? `- 企業概要: ${job.company.summary}` : ``,
     ``,
     `## 採用ポジション`,
@@ -661,21 +663,30 @@ app.post("/api/structure", async (req, res) => {
     // (2.7) 【歓迎】マーカーチェック: 原文に無い歓迎スキルは除去
     stripUnfoundedWant(sanitized, normalizedText, warnings);
 
-    // (2.8) company_key 解決 + 例外定義（overrides）差し込み + 企業定型ブロックマージ
-    const companyKey = resolveCompanyKey(sanitized.company.name);
+    // (2.8) company_key 解決（alias完全一致 → hints部分一致のフォールバック）
+    let companyKey = resolveCompanyKey(sanitized.company.name);
+    if (!companyKey) {
+      companyKey = resolveCompanyKeyWithHints(sanitized.company.name);
+    }
     if (companyKey) {
       log("company", `company_key 解決: "${sanitized.company.name}" → "${companyKey}"`);
     }
 
-    // D) company_overrides.json の定型差し込み（overrides 優先 → company_static は残りを埋める）
-    const overrideResult = applyCompanyOverrides(sanitized, companyKey);
-    if (overrideResult.applied) {
-      log("company", "company_overrides 定型差し込み", {
-        keys: overrideResult.appliedFields,
-        source: overrideResult.source?.name,
+    // (2.9) 表示会社名の正規化（原文 company.name は変更しない）
+    const displayName = resolveDisplayName(sanitized, companyKey);
+    if (displayName && displayName !== sanitized.company.name) {
+      log("company", `displayName 設定: "${displayName}"（原文: "${sanitized.company.name}"）`);
+    }
+
+    // D) company_profiles.json の定型差し込み（4項目のみ: hours/holidays/benefits/insurance）
+    const defaultsResult = applyCompanyDefaults(sanitized, companyKey);
+    if (defaultsResult.applied) {
+      log("inject", `companyKey=${companyKey}, fields=${defaultsResult.appliedFields.join(",")}`, {
+        sources: defaultsResult.sources,
       });
     }
 
+    // 旧 company_static は下位互換として残す（profiles で埋まらなかった分を補完）
     const mergeResult = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
     if (mergeResult.staticApplied) {
       log("company", "company_static 注入", { keys: mergeResult.staticAppliedKeys });
@@ -683,7 +694,7 @@ app.post("/api/structure", async (req, res) => {
 
     // 注入されたフィールドの一覧（faithfulness 除外用）
     const injectedFields = [
-      ...overrideResult.appliedFields,
+      ...defaultsResult.appliedFields,
       ...mergeResult.staticAppliedKeys,
     ];
 
@@ -791,7 +802,7 @@ app.post("/api/structure", async (req, res) => {
       }
     }
 
-    // (8) 成果物保存（static_applied / overrides_applied は job.json に内部メタとして追加）
+    // (8) 成果物保存
     const structuredMd = buildStructuredMarkdown(sanitized, normalizedText);
 
     const jobWithMeta: Record<string, unknown> = { ...sanitized };
@@ -799,9 +810,14 @@ app.post("/api/structure", async (req, res) => {
       jobWithMeta.static_applied = true;
       jobWithMeta.static_applied_keys = mergeResult.staticAppliedKeys;
     }
-    if (overrideResult.applied) {
-      jobWithMeta.overrides_applied = true;
-      jobWithMeta.overrides_applied_keys = overrideResult.appliedFields;
+    // 監査用: injected メタデータ
+    if (defaultsResult.applied) {
+      jobWithMeta.meta = {
+        injected: {
+          fields: defaultsResult.appliedFields,
+          sources: defaultsResult.sources,
+        },
+      };
     }
     fs.writeFileSync(path.join(finalDir, "job.json"), JSON.stringify(jobWithMeta, null, 2), "utf8");
     fs.writeFileSync(path.join(finalDir, "job_structured.md"), structuredMd, "utf8");
@@ -814,11 +830,12 @@ app.post("/api/structure", async (req, res) => {
       warnings,
       faithViolations: faithErrors.length > 0 ? faithErrors : undefined,
       showFixedOvertime,
-      companyName: sanitized.company.name,
+      companyName: sanitized.company.displayName ?? sanitized.company.name,
+      companyNameOriginal: sanitized.company.name,
       companyKey: companyKey ?? undefined,
       provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
-      overridesApplied: overrideResult.applied
-        ? { fields: overrideResult.appliedFields, source: overrideResult.source }
+      injected: defaultsResult.applied
+        ? { fields: defaultsResult.appliedFields, sources: defaultsResult.sources }
         : undefined,
       positionTitle: sanitized.position.title,
       jobTitle,
@@ -978,8 +995,8 @@ app.post("/api/render", async (req, res) => {
       let renderInjectedFields: string[] = [];
       try {
         const metaForRender = JSON.parse(fs.readFileSync(path.join(artifactDir, "meta.json"), "utf8"));
-        if (metaForRender.overridesApplied?.fields) {
-          renderInjectedFields.push(...metaForRender.overridesApplied.fields);
+        if (metaForRender.injected?.fields) {
+          renderInjectedFields.push(...metaForRender.injected.fields);
         }
         if (metaForRender.provenance) {
           for (const [field, source] of Object.entries(metaForRender.provenance)) {
@@ -1150,21 +1167,30 @@ app.post("/api/generate", async (req, res) => {
     // 【歓迎】マーカーチェック
     stripUnfoundedWant(sanitized, normalized, warnings);
 
-    // company_key 解決 + 例外定義（overrides）差し込み + 企業定型ブロックマージ
-    const companyKey = resolveCompanyKey(sanitized.company.name);
+    // company_key 解決（alias完全一致 → hints部分一致のフォールバック）
+    let companyKey = resolveCompanyKey(sanitized.company.name);
+    if (!companyKey) {
+      companyKey = resolveCompanyKeyWithHints(sanitized.company.name);
+    }
     if (companyKey) {
       log("company", `company_key 解決: "${sanitized.company.name}" → "${companyKey}"`);
     }
 
-    // D) company_overrides.json の定型差し込み（overrides 優先 → company_static は残りを埋める）
-    const overrideResult = applyCompanyOverrides(sanitized, companyKey);
-    if (overrideResult.applied) {
-      log("company", "company_overrides 定型差し込み", {
-        keys: overrideResult.appliedFields,
-        source: overrideResult.source?.name,
+    // 表示会社名の正規化（原文 company.name は変更しない）
+    const displayName = resolveDisplayName(sanitized, companyKey);
+    if (displayName && displayName !== sanitized.company.name) {
+      log("company", `displayName 設定: "${displayName}"（原文: "${sanitized.company.name}"）`);
+    }
+
+    // D) company_profiles.json の定型差し込み（4項目のみ: hours/holidays/benefits/insurance）
+    const defaultsResult = applyCompanyDefaults(sanitized, companyKey);
+    if (defaultsResult.applied) {
+      log("inject", `companyKey=${companyKey}, fields=${defaultsResult.appliedFields.join(",")}`, {
+        sources: defaultsResult.sources,
       });
     }
 
+    // 旧 company_static は下位互換として残す
     const mergeResult = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
     if (mergeResult.staticApplied) {
       log("company", "company_static 注入", { keys: mergeResult.staticAppliedKeys });
@@ -1172,7 +1198,7 @@ app.post("/api/generate", async (req, res) => {
 
     // 注入されたフィールドの一覧（faithfulness 除外用）
     const injectedFields = [
-      ...overrideResult.appliedFields,
+      ...defaultsResult.appliedFields,
       ...mergeResult.staticAppliedKeys,
     ];
 
@@ -1292,9 +1318,14 @@ app.post("/api/generate", async (req, res) => {
       jobWithMeta.static_applied = true;
       jobWithMeta.static_applied_keys = mergeResult.staticAppliedKeys;
     }
-    if (overrideResult.applied) {
-      jobWithMeta.overrides_applied = true;
-      jobWithMeta.overrides_applied_keys = overrideResult.appliedFields;
+    // 監査用: injected メタデータ
+    if (defaultsResult.applied) {
+      jobWithMeta.meta = {
+        injected: {
+          fields: defaultsResult.appliedFields,
+          sources: defaultsResult.sources,
+        },
+      };
     }
     fs.writeFileSync(path.join(artifactDir, "job.json"), JSON.stringify(jobWithMeta, null, 2), "utf8");
 
@@ -1309,11 +1340,12 @@ app.post("/api/generate", async (req, res) => {
       jobTitle: typeof jobTitle === "string" ? jobTitle : undefined,
       siteHint: siteHint || undefined,
       extractedLength,
-      companyName: sanitized.company.name,
+      companyName: sanitized.company.displayName ?? sanitized.company.name,
+      companyNameOriginal: sanitized.company.name,
       companyKey: companyKey ?? undefined,
       provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
-      overridesApplied: overrideResult.applied
-        ? { fields: overrideResult.appliedFields, source: overrideResult.source }
+      injected: defaultsResult.applied
+        ? { fields: defaultsResult.appliedFields, sources: defaultsResult.sources }
         : undefined,
       positionTitle: sanitized.position.title,
       savedAt: new Date().toISOString(),

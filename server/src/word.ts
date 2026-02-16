@@ -370,6 +370,7 @@ const renderJobDocxFromScratch = async (
     : [];
 
   // タイトル（24pt/太字/中央）＋企業名・ポジション名（中央）
+  const scratchDisplayName = job.company.displayName ?? job.company.name;
   const titleLines: Paragraph[] = [
     new Paragraph({
       alignment: AlignmentType.CENTER,
@@ -377,7 +378,7 @@ const renderJobDocxFromScratch = async (
     }),
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      children: [makeRun(job.company.name, { size: 28 })]
+      children: [makeRun(scratchDisplayName, { size: 28 })]
     }),
     new Paragraph({
       alignment: AlignmentType.CENTER,
@@ -460,8 +461,9 @@ export const renderJobDocx = async (
         : ""
     : "";
 
+  const companyDisplayName = job.company.displayName ?? job.company.name;
   const data = {
-    company: { name: job.company.name },
+    company: { name: companyDisplayName },
     position: { title: job.position.title, contractTerm: job.position.contractTerm ?? "" },
     job: {
       responsibilities_text: applyRenderFormatting(listToText(job.job.responsibilities)),
@@ -497,7 +499,7 @@ export const renderJobDocx = async (
   const rendered = doc.getZip().generate({ type: "nodebuffer" });
   const withEmptyRowsRemoved = removeEmptyRows(rendered);
   // テンプレモードでもタイトル・企業名・ポジション名を必ず先頭に表示
-  return prependTitleBlock(withEmptyRowsRemoved, job.company.name, job.position.title || (opts?.jobTitle ?? ""));
+  return prependTitleBlock(withEmptyRowsRemoved, companyDisplayName, job.position.title || (opts?.jobTitle ?? ""));
 };
 
 const TEMPLATE_NAME = "museum_template.docx";

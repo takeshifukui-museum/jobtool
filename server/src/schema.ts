@@ -141,7 +141,7 @@ export const jobPostingSchema = {
 export type JobPosting = {
   schemaVersion: "museum_jobposting_v1";
   source: { url: string; site: string; capturedAt?: string };
-  company: { name: string; nameEvidence?: string; summary?: string };
+  company: { name: string; nameEvidence?: string; summary?: string; displayName?: string };
   position: {
     title: string;
     titleEvidence?: string;

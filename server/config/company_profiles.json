@@ -1,0 +1,73 @@
+{
+  "_resolveHints": [
+    { "contains": "札幌スタジオ", "key": "sega_sapporo_studio" },
+    { "contains": "フェイブ", "key": "sega_fave" },
+    { "contains": "セガ", "key": "sega" }
+  ],
+
+  "sega": {
+    "displayCompanyName": "株式会社セガ",
+    "defaults": {
+      "work.hours": "フレックスタイム制（コアタイムなし） 標準的な就業時間帯 9:00〜17:30",
+      "work.holidays": "完全週休2日制（土・日）、祝日、年次有給休暇、夏季休日（3日）、年末年始休日、慶弔休暇、リフレッシュ休暇 等",
+      "benefits.items": [
+        "通勤手当（会社規定に基づき支給）",
+        "社員持株会制度",
+        "慶弔見舞金制度",
+        "育児・介護休業制度",
+        "健康診断"
+      ],
+      "insurance.socialInsurance": "健康保険、厚生年金保険、雇用保険、労災保険"
+    },
+    "sources": {
+      "work.hours": ["https://www.sega.co.jp/recruit/fresh/details/"],
+      "work.holidays": ["https://www.sega.co.jp/recruit/fresh/details/"],
+      "benefits.items": ["https://www.sega.co.jp/recruit/fresh/details/"],
+      "insurance.socialInsurance": ["https://www.sega.co.jp/recruit/fresh/details/"]
+    }
+  },
+
+  "sega_sapporo_studio": {
+    "displayCompanyName": "株式会社セガ 札幌スタジオ",
+    "defaults": {
+      "work.hours": "フレックスタイム制（コアタイムなし） 標準的な就業時間帯 9:00〜17:30",
+      "work.holidays": "完全週休2日制（土・日）、祝日、年次有給休暇、夏季休日（3日）、年末年始休日、慶弔休暇、リフレッシュ休暇 等",
+      "benefits.items": [
+        "通勤手当（会社規定に基づき支給）",
+        "社員持株会制度",
+        "慶弔見舞金制度",
+        "育児・介護休業制度",
+        "健康診断"
+      ],
+      "insurance.socialInsurance": "健康保険、厚生年金保険、雇用保険、労災保険"
+    },
+    "sources": {
+      "work.hours": ["https://www.sega.co.jp/recruit/fresh/details/sapporostudio/"],
+      "work.holidays": ["https://www.sega.co.jp/recruit/fresh/details/sapporostudio/"],
+      "benefits.items": ["https://www.sega.co.jp/recruit/fresh/details/sapporostudio/"],
+      "insurance.socialInsurance": ["https://www.sega.co.jp/recruit/fresh/details/sapporostudio/"]
+    }
+  },
+
+  "sega_fave": {
+    "displayCompanyName": "株式会社セガフェイブ",
+    "defaults": {
+      "work.hours": "フレックスタイム制（コアタイムなし） 標準的な就業時間帯 9:00〜17:30",
+      "work.holidays": "完全週休2日制（土・日）、祝日、年次有給休暇、夏季休日（3日）、年末年始休日、慶弔休暇、リフレッシュ休暇 等",
+      "benefits.items": [
+        "通勤手当（会社規定に基づき支給）",
+        "社員持株会制度",
+        "慶弔見舞金制度",
+        "育児・介護休業制度",
+        "健康診断"
+      ],
+      "insurance.socialInsurance": "健康保険、厚生年金保険、雇用保険、労災保険"
+    },
+    "sources": {
+      "work.hours": ["https://www.segafave.co.jp/recruit/details/"],
+      "work.holidays": ["https://www.segafave.co.jp/recruit/details/"],
+      "benefits.items": ["https://www.segafave.co.jp/recruit/details/"],
+      "insurance.socialInsurance": ["https://www.segafave.co.jp/recruit/details/"]
+    }
+  }
+}
