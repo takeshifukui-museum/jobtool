@@ -72,7 +72,12 @@ const setNestedValue = (obj: Record<string, unknown>, dotPath: string, value: un
 // evidence 検証: rawText 内に evidence が含まれていなければ項目を無効化
 // ---------------------------------------------------------------------------
 const normalizeForEvidence = (s: string): string =>
-  s.replace(/[\r\n\t\u3000]/g, " ").replace(/\s+/g, " ").trim();
+  s.replace(/[\r\n\t\u3000]/g, " ")
+   .replace(/\s+/g, " ")
+   .replace(/：/g, ":")
+   .replace(/（/g, "(")
+   .replace(/）/g, ")")
+   .trim();
 
 type EvidenceSpec = {
   fieldLabel: string;
@@ -101,7 +106,15 @@ const validateEvidence = (
       fieldLabel: "position.title",
       evidence: job.position.titleEvidence,
       getValue: () => job.position.title,
-      clearValue: () => { job.position.title = ""; },
+      clearValue: () => {
+        // titleEvidence が存在する場合はクリアしない
+        // （全角/半角差異等による evidence 不一致の可能性が高い）
+        if (job.position.titleEvidence?.trim()) {
+          log("evidence", "position.title: evidence mismatch but titleEvidence exists — keeping title");
+          return;
+        }
+        job.position.title = "";
+      },
     },
     {
       fieldLabel: "position.employmentType",
@@ -180,6 +193,42 @@ const applyCompanyNameNormalization = (job: JobPosting): void => {
     if (before !== job.company.name) {
       log("company", `企業名を辞書正規化: "${before}" → "${job.company.name}"`);
     }
+  }
+};
+
+// ---------------------------------------------------------------------------
+// B-2) position.title 正規化: 装飾マーカー除去 + 安全ガード
+// ---------------------------------------------------------------------------
+const normalizePositionTitle = (job: JobPosting): void => {
+  if (!job.position.title?.trim()) return;
+
+  let title = job.position.title;
+  const original = title;
+
+  // ◆急募◆ 等の装飾マーカーを除去
+  title = title.replace(/◆[^◆]*◆/g, "").trim();
+
+  // 前後を囲む【】を除去（中身は保持）
+  const bracketMatch = /^【(.+)】$/.exec(title);
+  if (bracketMatch) {
+    title = bracketMatch[1].trim();
+  }
+
+  // 除去後に空になった場合は元の値を保持（空にしない）
+  if (!title) return;
+
+  // 除去後の文字列が雇用形態と「完全一致」する場合のみ空にする
+  // （タイトル全体が雇用形態ではない限り保持）
+  const empType = job.position.employmentType?.trim();
+  if (empType && title === empType) {
+    log("title-normalize", `title が employmentType と完全一致のためクリア: "${title}"`);
+    job.position.title = "";
+    return;
+  }
+
+  if (title !== original) {
+    log("title-normalize", `title 正規化: "${original}" → "${title}"`);
+    job.position.title = title;
   }
 };
 
@@ -786,6 +835,9 @@ app.post("/api/structure", async (req, res) => {
     // (2.6) 企業名の正規化（トリムのみ。ハードコード辞書は廃止済み）
     applyCompanyNameNormalization(sanitized);
 
+    // (2.6b) position.title 正規化（◆急募◆・【】除去 + 安全ガード）
+    normalizePositionTitle(sanitized);
+
     // (2.7) 【歓迎】マーカーチェック: 原文に無い歓迎スキルは除去
     stripUnfoundedWant(sanitized, normalizedText, warnings);
 
@@ -1336,6 +1388,9 @@ app.post("/api/generate", async (req, res) => {
 
     // 企業名の正規化（トリムのみ）
     applyCompanyNameNormalization(sanitized);
+
+    // position.title 正規化（◆急募◆・【】除去 + 安全ガード）
+    normalizePositionTitle(sanitized);
 
     // 【歓迎】マーカーチェック
     stripUnfoundedWant(sanitized, normalized, warnings);
