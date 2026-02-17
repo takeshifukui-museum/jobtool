@@ -17,25 +17,11 @@ const sanitizePathPart = (s) => {
     .replace(/[ .]+$/g, "");
 };
 
-const buildDownloadFilename = (folderName, suggestedFilename) => {
+const buildDownloadFilename = (suggestedFilename) => {
   const fallback = "求人票_求人情報.docx";
   const safeFile = sanitizePathPart(suggestedFilename || fallback) || fallback;
   const file = safeFile.toLowerCase().endsWith(".docx") ? safeFile : `${safeFile}.docx`;
-
-  const rawFolder = String(folderName || "")
-    .replace(/\\/g, "/")
-    .replace(/^[a-zA-Z]:/g, "")
-    .replace(/^\/+/g, "");
-
-  const parts = rawFolder
-    .split("/")
-    .map((p) => p.trim())
-    .filter((p) => p && p !== "." && p !== "..")
-    .map(sanitizePathPart)
-    .filter(Boolean);
-
-  if (parts.length === 0) return file;
-  return `${parts.join("/")}/${file}`;
+  return file;
 };
 
 const apiPost = async (url, body) => {
@@ -137,7 +123,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         const runId = message.runId || message.sessionId;
-        const { folderName, suggestedFilename } = message;
+        const { suggestedFilename } = message;
         if (!runId) {
           sendResponse({ ok: false, message: "runId がありません" });
           return;
@@ -145,7 +131,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const data = await apiPost(API_RENDER, { runId, approve: true });
 
-        const filename = buildDownloadFilename(folderName, data.suggestedFilename || suggestedFilename);
+        // サーバーがユーザー指定フォルダへコピー済みの場合
+        const copiedFiles = data.copiedFiles ?? [];
+        const hasWordCopy = copiedFiles.some((f) => f.endsWith(".docx"));
+
+        if (hasWordCopy) {
+          // Word はサーバー側で保存済み → chrome.downloads 不要
+          // スカウト文もサーバー側で保存済み
+          console.log("[background] files copied by server:", copiedFiles);
+          sendResponse({ ok: true, message: "保存しました", copiedFiles });
+          return;
+        }
+
+        // フォルダ未指定（後方互換）: chrome.downloads で保存
+        const filename = buildDownloadFilename(data.suggestedFilename || suggestedFilename);
         const mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
         // objectURL を使わず data: URL で downloads に渡す

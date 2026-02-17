@@ -1,11 +1,18 @@
-const statusEl = document.getElementById("status");
-const folderEl = document.getElementById("folder");
+const API_BASE = "http://localhost:3000";
+
 const btnGenerate = document.getElementById("btn-generate");
 const btnRender = document.getElementById("btn-render");
 const btnCancel = document.getElementById("btn-cancel");
 const previewArea = document.getElementById("preview-area");
 const warningsEl = document.getElementById("warnings");
 const btnRow = document.getElementById("btn-row");
+const statusEl = document.getElementById("status");
+
+// 保存先フォルダ UI
+const wordOutputDirEl = document.getElementById("word-output-dir");
+const textOutputDirEl = document.getElementById("text-output-dir");
+const btnBrowseWord = document.getElementById("btn-browse-word");
+const btnBrowseText = document.getElementById("btn-browse-text");
 
 // 現在のセッション（プレビュー後に保持）
 let currentSession = null;
@@ -14,23 +21,63 @@ const setStatus = (text) => {
   statusEl.textContent = text;
 };
 
-const loadFolderName = async () => {
+// ===========================================================================
+// 設定の読み込み / 保存（サーバー側 user_settings.json 経由）
+// ===========================================================================
+const loadSettings = async () => {
   try {
-    const data = await chrome.storage.local.get({ folderName: "" });
-    const saved = (data.folderName || "").toString();
-    if (folderEl) folderEl.value = saved;
+    const res = await fetch(`${API_BASE}/api/settings`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (wordOutputDirEl) wordOutputDirEl.value = data.wordOutputDir || "";
+    if (textOutputDirEl) textOutputDirEl.value = data.textOutputDir || "";
+  } catch {
+    // サーバー未起動時は無視
+  }
+};
+
+const saveSettings = async () => {
+  try {
+    await fetch(`${API_BASE}/api/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        wordOutputDir: wordOutputDirEl?.value || "",
+        textOutputDir: textOutputDirEl?.value || "",
+      }),
+    });
   } catch {
     // ignore
   }
 };
 
-const saveFolderName = async (folderName) => {
+const browseFolder = async (inputEl) => {
   try {
-    await chrome.storage.local.set({ folderName: folderName || "" });
+    const res = await fetch(`${API_BASE}/api/select-folder`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ currentPath: inputEl?.value || "" }),
+    });
+    const data = await res.json();
+    if (data.path) {
+      inputEl.value = data.path;
+      await saveSettings();
+    }
   } catch {
     // ignore
   }
 };
+
+// 起動時に設定を読み込み
+loadSettings();
+
+// 参照ボタン
+btnBrowseWord.addEventListener("click", () => browseFolder(wordOutputDirEl));
+btnBrowseText.addEventListener("click", () => browseFolder(textOutputDirEl));
+
+// 入力欄を直接編集した場合も保存
+wordOutputDirEl.addEventListener("change", () => saveSettings());
+textOutputDirEl.addEventListener("change", () => saveSettings());
 
 const resetToInitial = () => {
   currentSession = null;
@@ -43,14 +90,12 @@ const resetToInitial = () => {
   setStatus("待機中");
 };
 
-loadFolderName();
-
 // ===========================================================================
 // Step 1: 「求人票を解析」→ プレビュー表示
 // ===========================================================================
 btnGenerate.addEventListener("click", () => {
-  const folderName = (folderEl?.value ?? "").trim().replace(/\\/g, "/");
-  saveFolderName(folderName);
+  // 保存先設定を保存
+  saveSettings();
 
   btnGenerate.disabled = true;
   previewArea.style.display = "none";
@@ -125,7 +170,7 @@ btnGenerate.addEventListener("click", () => {
 });
 
 // ===========================================================================
-// Step 2: 「OK — Word生成」→ docx生成 & ダウンロード
+// Step 2: 「OK — Word生成」→ docx生成 & ダウンロード or 自動保存
 // ===========================================================================
 btnRender.addEventListener("click", () => {
   const runId = currentSession?.runId || currentSession?.sessionId;
@@ -134,7 +179,6 @@ btnRender.addEventListener("click", () => {
     return;
   }
 
-  const folderName = (folderEl?.value ?? "").trim().replace(/\\/g, "/");
   btnRender.disabled = true;
   btnCancel.disabled = true;
   setStatus("Word生成中...");
@@ -144,7 +188,6 @@ btnRender.addEventListener("click", () => {
       type: "RENDER_JOB_DOCX",
       runId,
       sessionId: runId,
-      folderName: folderName || undefined,
       suggestedFilename: currentSession.suggestedFilename
     },
     (response) => {
@@ -160,8 +203,13 @@ btnRender.addEventListener("click", () => {
         return;
       }
 
-      const msg = "完了: ダウンロードしました";
-      setStatus(msg);
+      // サーバーがコピー済みの場合はコピー先を表示
+      const copied = response.copiedFiles ?? [];
+      if (copied.length > 0) {
+        setStatus(`完了: ${copied.length}件のファイルを保存しました`);
+      } else {
+        setStatus("完了: ダウンロードしました");
+      }
       // 生成完了後はボタンを隠す
       btnRow.style.display = "none";
     }

@@ -1,7 +1,9 @@
 import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import crypto from "node:crypto";
+import { exec } from "node:child_process";
 import express from "express";
 import cors from "cors";
 import { generateJobPosting, generateScoutText } from "./openai.js";
@@ -229,6 +231,37 @@ const normalizePositionTitle = (job: JobPosting): void => {
   if (title !== original) {
     log("title-normalize", `title 正規化: "${original}" → "${title}"`);
     job.position.title = title;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// B-3) 郵便番号の補完: rawText に郵便番号があり work.location に無い場合に付与
+// ---------------------------------------------------------------------------
+const recoverPostalCode = (job: JobPosting, rawText: string): void => {
+  const location = job.work.location ?? "";
+  if (!location.trim()) return;
+
+  // work.location に既に郵便番号（〒 or NNN-NNNN）があれば何もしない
+  if (/\d{3}-\d{4}/.test(location)) return;
+
+  // rawText に郵便番号が一切無ければ何もしない
+  if (!/\d{3}-\d{4}/.test(rawText)) return;
+
+  // location の先頭テキスト（都道府県+市区町村レベル）で rawText 内を検索
+  const searchKey = location.replace(/[\r\n]/g, " ").trim().slice(0, 30);
+  if (searchKey.length < 3) return;
+
+  const escaped = searchKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const locIndex = rawText.search(new RegExp(escaped));
+  if (locIndex < 0) return;
+
+  // 検索キーの前方 100 文字以内に郵便番号があれば補完
+  const beforeText = rawText.slice(Math.max(0, locIndex - 100), locIndex);
+  const postalMatch = beforeText.match(/〒?(\d{3}-\d{4})/);
+  if (postalMatch) {
+    const code = `〒${postalMatch[1]}`;
+    job.work.location = `${code}\n${location}`;
+    log("postal-code", `郵便番号を補完: ${code}`, { location: location.slice(0, 50) });
   }
 };
 
@@ -477,6 +510,135 @@ const resolveRunDir = (runId: string): string | null => {
     return null;
   }
   return resolved;
+};
+
+// ---------------------------------------------------------------------------
+// ユーザー設定の永続化（user_settings.json）
+// ---------------------------------------------------------------------------
+const USER_SETTINGS_PATH = path.resolve(process.cwd(), "config", "user_settings.json");
+
+interface UserSettings {
+  wordOutputDir: string;
+  textOutputDir: string;
+}
+
+const loadUserSettings = (): UserSettings => {
+  try {
+    const raw = fs.readFileSync(USER_SETTINGS_PATH, "utf8");
+    const data = JSON.parse(raw);
+    return {
+      wordOutputDir: data.wordOutputDir || "",
+      textOutputDir: data.textOutputDir || "",
+    };
+  } catch {
+    return { wordOutputDir: "", textOutputDir: "" };
+  }
+};
+
+const saveUserSettings = (settings: UserSettings): void => {
+  const dir = path.dirname(USER_SETTINGS_PATH);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(USER_SETTINGS_PATH, JSON.stringify(settings, null, 2), "utf8");
+};
+
+// ---------------------------------------------------------------------------
+// Windows フォルダ選択ダイアログ（PowerShell 経由）
+// ---------------------------------------------------------------------------
+const showFolderDialog = (initialDir?: string): Promise<string> => {
+  return new Promise((resolve) => {
+    const lines = [
+      "Add-Type -AssemblyName System.Windows.Forms",
+      "$d = New-Object System.Windows.Forms.FolderBrowserDialog",
+      `$d.Description = '保存先フォルダを選択してください'`,
+      initialDir ? `$d.SelectedPath = '${initialDir.replace(/'/g, "''")}'` : "",
+      "if($d.ShowDialog() -eq 'OK'){ Write-Host $d.SelectedPath }",
+    ].filter(Boolean).join("; ");
+    const tmpFile = path.join(os.tmpdir(), `museum_folder_${Date.now()}.ps1`);
+    fs.writeFileSync(tmpFile, lines, "utf8");
+    exec(
+      `powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpFile}"`,
+      { timeout: 120_000 },
+      (err, stdout) => {
+        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+        if (err) { resolve(""); return; }
+        resolve(stdout.trim());
+      },
+    );
+  });
+};
+
+// ---------------------------------------------------------------------------
+// ファイルコピー（render 完了後に呼び出し）
+// ---------------------------------------------------------------------------
+interface CopyResult {
+  copiedFiles: string[];
+  errors: string[];
+}
+
+const copyOutputFiles = (
+  artifactDir: string,
+  suggestedFilename: string,
+  scoutText: string | null,
+): CopyResult => {
+  const settings = loadUserSettings();
+  const copiedFiles: string[] = [];
+  const errors: string[] = [];
+
+  // --- Word 保存先 ---
+  if (settings.wordOutputDir) {
+    try {
+      fs.mkdirSync(settings.wordOutputDir, { recursive: true });
+      const srcDocx = path.join(artifactDir, "output.docx");
+      if (fs.existsSync(srcDocx)) {
+        const destDocx = path.join(settings.wordOutputDir, suggestedFilename);
+        fs.copyFileSync(srcDocx, destDocx);
+        copiedFiles.push(destDocx);
+        log("copy", `Word保存: ${destDocx}`);
+      }
+      // スカウト文も Word 保存先に
+      if (scoutText) {
+        const scoutFilename = suggestedFilename
+          .replace(/\.docx$/i, "")
+          .replace(/^求人票_/, "スカウト文_") + ".txt";
+        const destScout = path.join(settings.wordOutputDir, scoutFilename);
+        fs.writeFileSync(destScout, scoutText, "utf8");
+        copiedFiles.push(destScout);
+        log("copy", `スカウト文保存: ${destScout}`);
+      }
+    } catch (e) {
+      const msg = `Word保存先コピー失敗: ${e instanceof Error ? e.message : String(e)}`;
+      log("copy", msg);
+      errors.push(msg);
+    }
+  }
+
+  // --- テキスト保存先 ---
+  if (settings.textOutputDir) {
+    try {
+      fs.mkdirSync(settings.textOutputDir, { recursive: true });
+      const baseName = suggestedFilename.replace(/\.docx$/i, "");
+      const textFiles: Array<{ src: string; destName: string }> = [
+        { src: "job.json", destName: `${baseName}.json` },
+        { src: "job_structured.md", destName: `${baseName}_structured.md` },
+        { src: "job_raw.md", destName: `${baseName}_raw.md` },
+      ];
+      for (const { src, destName } of textFiles) {
+        const srcPath = path.join(artifactDir, src);
+        if (fs.existsSync(srcPath)) {
+          const destPath = path.join(settings.textOutputDir, destName);
+          fs.copyFileSync(srcPath, destPath);
+          copiedFiles.push(destPath);
+          log("copy", `テキスト保存: ${destPath}`);
+        }
+      }
+    } catch (e) {
+      const msg = `テキスト保存先コピー失敗: ${e instanceof Error ? e.message : String(e)}`;
+      log("copy", msg);
+      errors.push(msg);
+    }
+  }
+
+  return { copiedFiles, errors };
 };
 
 // ---------------------------------------------------------------------------
@@ -838,6 +1000,9 @@ app.post("/api/structure", async (req, res) => {
     // (2.6b) position.title 正規化（◆急募◆・【】除去 + 安全ガード）
     normalizePositionTitle(sanitized);
 
+    // (2.6c) 郵便番号の補完（rawText にあり work.location に無い場合）
+    recoverPostalCode(sanitized, normalizedText);
+
     // (2.7) 【歓迎】マーカーチェック: 原文に無い歓迎スキルは除去
     stripUnfoundedWant(sanitized, normalizedText, warnings);
 
@@ -1114,9 +1279,53 @@ app.get("/api/preview", (req, res) => {
 });
 
 // ===========================================================================
+// GET /api/settings — ユーザー設定（保存先フォルダ等）を返す
+// ===========================================================================
+app.get("/api/settings", (_req, res) => {
+  try {
+    const settings = loadUserSettings();
+    return res.json(settings);
+  } catch (e) {
+    return res.status(500).json({ error: { message: String(e) } });
+  }
+});
+
+// ===========================================================================
+// POST /api/settings — ユーザー設定を保存
+// ===========================================================================
+app.post("/api/settings", (req, res) => {
+  try {
+    const { wordOutputDir, textOutputDir } = req.body ?? {};
+    const settings: UserSettings = {
+      wordOutputDir: (wordOutputDir ?? "").trim(),
+      textOutputDir: (textOutputDir ?? "").trim(),
+    };
+    saveUserSettings(settings);
+    log("settings", "ユーザー設定保存", settings as unknown as Record<string, unknown>);
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: { message: String(e) } });
+  }
+});
+
+// ===========================================================================
+// POST /api/select-folder — フォルダ選択ダイアログを表示（Windows）
+// ===========================================================================
+app.post("/api/select-folder", async (req, res) => {
+  try {
+    const initial = (req.body?.currentPath ?? "").trim() || undefined;
+    const selected = await showFolderDialog(initial);
+    return res.json({ path: selected });
+  } catch (e) {
+    log("select-folder", `フォルダ選択エラー: ${String(e)}`);
+    return res.json({ path: "" });
+  }
+});
+
+// ===========================================================================
 // POST /api/render
 //   入力: { runId, approve: true }
-//   出力: { docx (base64), scoutText, suggestedFilename, meta }
+//   出力: { docx (base64), scoutText, suggestedFilename, copiedFiles, meta }
 //   保存済み job.json → テンプレ差し込み → output.docx 保存 → 返却
 // ===========================================================================
 app.post("/api/render", async (req, res) => {
@@ -1258,10 +1467,15 @@ app.post("/api/render", async (req, res) => {
 
     const suggestedFilename = buildSuggestedFilename(sanitized.position.title, sanitized.position.title, sanitized.company.displayName ?? sanitized.company.name);
 
+    // ユーザー指定フォルダへコピー
+    const copyResult = copyOutputFiles(artifactDir, suggestedFilename, scoutText);
+
     return res.json({
       docx: docxBuffer.toString("base64"),
       scoutText,
       suggestedFilename,
+      copiedFiles: copyResult.copiedFiles,
+      copyErrors: copyResult.errors,
       meta: { warnings: sanitized.compliance?.warnings ?? [] },
     });
   } catch (error) {
@@ -1391,6 +1605,9 @@ app.post("/api/generate", async (req, res) => {
 
     // position.title 正規化（◆急募◆・【】除去 + 安全ガード）
     normalizePositionTitle(sanitized);
+
+    // 郵便番号の補完（rawText にあり work.location に無い場合）
+    recoverPostalCode(sanitized, normalized);
 
     // 【歓迎】マーカーチェック
     stripUnfoundedWant(sanitized, normalized, warnings);
