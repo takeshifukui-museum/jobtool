@@ -2,10 +2,21 @@
 // Museum JobTool — Content Script (DOM優先抽出 + siteHint別 strategy)
 // ---------------------------------------------------------------------------
 
-// ---- NFKC 正規化 ----
+// ---- 丸数字（①〜⑳）→ "1) " 形式変換 ----
+// NFKC は ① を素の "1" に変換し直後テキストと連結するため、先に展開する。
+const CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳";
+const replaceCircledNumbers = (text) => {
+  let result = text;
+  for (let i = 0; i < CIRCLED_NUMBERS.length; i++) {
+    result = result.replaceAll(CIRCLED_NUMBERS[i], `${i + 1}) `);
+  }
+  return result;
+};
+
+// ---- NFKC 正規化（丸数字展開後に適用） ----
 const normalizeNFKC = (text) => {
   try {
-    return String(text || "").normalize("NFKC");
+    return replaceCircledNumbers(String(text || "")).normalize("NFKC");
   } catch {
     return String(text || "");
   }

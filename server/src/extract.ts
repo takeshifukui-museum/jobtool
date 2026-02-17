@@ -1,6 +1,21 @@
+// ---------------------------------------------------------------------------
+// 丸数字（①〜⑳）→ "1) " 形式に変換（NFKC前に適用必須）
+// NFKCは①を素の "1" に変換し直後テキストと連結して不自然になるため、
+// NFKC適用前にスペース付き番号形式へ展開する。
+// ---------------------------------------------------------------------------
+const CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳";
+
+export const replaceCircledNumbers = (text: string): string => {
+  let result = text;
+  for (let i = 0; i < CIRCLED_NUMBERS.length; i++) {
+    result = result.replaceAll(CIRCLED_NUMBERS[i], `${i + 1}) `);
+  }
+  return result;
+};
+
 export const normalizeRawText = (rawText: string): string => {
-  // NFKC正規化 + 改行整理
-  return rawText.normalize("NFKC").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  // 丸数字展開 → NFKC正規化 → 改行整理
+  return replaceCircledNumbers(rawText).normalize("NFKC").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 };
 
 export const listToText = (items?: string[]): string => {

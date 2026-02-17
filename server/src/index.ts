@@ -356,14 +356,11 @@ const sanitizeFilename = (s: string, maxLen = 80): string => {
   return t || "求人情報";
 };
 
-const buildSuggestedFilename = (pageTitle: string | undefined, positionTitle: string, companyName?: string): string => {
-  const company = companyName ? sanitizeFilename(companyName, 30) : "";
-  const raw = (pageTitle && pageTitle.trim()) || positionTitle || "";
-  const title = sanitizeFilename(raw);
-  if (company) {
-    return `求人票_${company}_${title || "求人情報"}.docx`;
-  }
-  return `求人票_${title || "求人情報"}.docx`;
+const buildSuggestedFilename = (_pageTitle: string | undefined, positionTitle: string, companyName?: string): string => {
+  // 常に "求人票_企業名_ポジション名.docx" 形式。欠落時は "不明"（推測禁止）
+  const company = (companyName && sanitizeFilename(companyName, 30)) || "不明";
+  const position = (positionTitle && sanitizeFilename(positionTitle)) || "不明";
+  return `求人票_${company}_${position}.docx`;
 };
 
 const listToMd = (items: string[] | undefined): string => {

@@ -372,7 +372,7 @@ const renderJobDocxFromScratch = async (
     console.log(`[word] logo loaded`, { path: logo.path, size: logo.data.length });
   }
 
-  // ロゴ右上（ヘッダー）
+  // ロゴ右上（ヘッダー）— アスペクト比を必ず維持（同倍率スケール）
   const headerChildren = logo
     ? [
         new Paragraph({
@@ -383,8 +383,15 @@ const renderJobDocxFromScratch = async (
               data: logo.data,
               transformation: (() => {
                 const dim = readPngDimensions(logo.data);
-                const h = dim ? Math.round(LOGO_TARGET_WIDTH * dim.height / dim.width) : 69;
-                return { width: LOGO_TARGET_WIDTH, height: h };
+                if (dim) {
+                  const scale = LOGO_TARGET_WIDTH / dim.width;
+                  const w = Math.round(dim.width * scale);
+                  const h = Math.round(dim.height * scale);
+                  console.log(`[word] logo transformation: original=${dim.width}x${dim.height} → display=${w}x${h} (scale=${scale.toFixed(4)})`);
+                  return { width: w, height: h };
+                }
+                console.warn("[word] logo PNG dimensions unreadable – using fallback 220x69");
+                return { width: LOGO_TARGET_WIDTH, height: 69 };
               })()
             })
           ]
