@@ -83,7 +83,8 @@ type EvidenceSpec = {
 
 const validateEvidence = (
   job: JobPosting,
-  normalizedText: string
+  normalizedText: string,
+  skipFields?: Set<string>
 ): { warnings: string[] } => {
   const warnings: string[] = [];
   const rawNorm = normalizeForEvidence(normalizedText);
@@ -128,6 +129,8 @@ const validateEvidence = (
   ];
 
   for (const spec of specs) {
+    if (skipFields?.has(spec.fieldLabel)) continue; // DOM sections 優先取得済み → スキップ
+
     const value = spec.getValue();
     if (!value.trim()) continue; // 値が空ならチェック不要
 
@@ -695,8 +698,24 @@ app.post("/api/structure", async (req, res) => {
       new Set([...sanitized.compliance.forbiddenDetected, ...forbiddenDetected])
     );
 
+    // (2.4a) DOM sections から会社名を優先取得（rawText依存より信頼性が高い）
+    const evidenceSkipFields = new Set<string>();
+    try {
+      const sectionsPath = path.join(artifactDir, "extracted_sections.json");
+      if (fs.existsSync(sectionsPath)) {
+        const secData = JSON.parse(fs.readFileSync(sectionsPath, "utf8"));
+        const secs: Array<{ label: string; value: string }> = secData.sections ?? [];
+        const compSec = secs.find((s) => s.label === "会社名");
+        if (compSec && compSec.value.trim()) {
+          sanitized.company.name = compSec.value.trim();
+          evidenceSkipFields.add("company.name");
+          log("field_source", `company.name source=sections (DOM優先)`, { value: compSec.value.trim() });
+        }
+      }
+    } catch { /* sections 読み込み失敗時は OpenAI フォールバック */ }
+
     // (2.5) evidence 検証: rawText 内に根拠が無い項目を無効化
-    const evidenceResult = validateEvidence(sanitized, normalizedText);
+    const evidenceResult = validateEvidence(sanitized, normalizedText, evidenceSkipFields);
     const warnings: string[] = [...evidenceResult.warnings];
 
     // (2.5b) DOM sections によるフィールド補完 + ソース追跡
@@ -1249,8 +1268,19 @@ app.post("/api/generate", async (req, res) => {
       new Set([...sanitized.compliance.forbiddenDetected, ...forbiddenDetected])
     );
 
+    // DOM sections から会社名を優先取得（rawText依存より信頼性が高い）
+    const genEvidenceSkipFields = new Set<string>();
+    if (Array.isArray(genSections)) {
+      const compSec = genSections.find((s: { label: string; value?: string }) => s.label === "会社名");
+      if (compSec && compSec.value?.trim()) {
+        sanitized.company.name = compSec.value.trim();
+        genEvidenceSkipFields.add("company.name");
+        log("field_source", `company.name source=sections (DOM優先)`, { value: compSec.value.trim() });
+      }
+    }
+
     // evidence 検証: rawText 内に根拠が無い項目を無効化
-    const evidenceResult = validateEvidence(sanitized, normalized);
+    const evidenceResult = validateEvidence(sanitized, normalized, genEvidenceSkipFields);
     const warnings: string[] = [...evidenceResult.warnings];
 
     // DOM sections によるフィールド補完（generate経路）
