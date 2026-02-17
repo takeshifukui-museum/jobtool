@@ -84,7 +84,8 @@ type EvidenceSpec = {
 const validateEvidence = (
   job: JobPosting,
   normalizedText: string,
-  skipFields?: Set<string>
+  skipFields?: Set<string>,
+  sections?: Array<{ label: string; value: string }>
 ): { warnings: string[] } => {
   const warnings: string[] = [];
   const rawNorm = normalizeForEvidence(normalizedText);
@@ -144,12 +145,26 @@ const validateEvidence = (
     }
 
     const evNorm = normalizeForEvidence(ev);
-    if (!rawNorm.includes(evNorm)) {
-      // evidence が rawText に存在しない → ハルシネーションの疑い
-      log("evidence", `EVIDENCE_MISSING: ${spec.fieldLabel} (evidence not found in rawText)`, { evidence: ev });
-      warnings.push(`EVIDENCE_MISSING: ${spec.fieldLabel}`);
-      spec.clearValue();
+
+    // rawText に存在すれば OK
+    if (rawNorm.includes(evNorm)) continue;
+
+    // sections（DOM由来）にも問い合わせ（HRMOS 等の DOM 優先抽出対応）
+    if (sections && sections.length > 0) {
+      const inSections = sections.some((s) => {
+        const secNorm = normalizeForEvidence(s.value);
+        return secNorm.includes(evNorm);
+      });
+      if (inSections) {
+        log("evidence", `${spec.fieldLabel}: evidence found in DOM sections (not in rawText)`, { evidence: ev });
+        continue; // sections で見つかったので OK
+      }
     }
+
+    // evidence が rawText にも sections にも存在しない → ハルシネーションの疑い
+    log("evidence", `EVIDENCE_MISSING: ${spec.fieldLabel} (evidence not found in rawText or sections)`, { evidence: ev });
+    warnings.push(`EVIDENCE_MISSING: ${spec.fieldLabel}`);
+    spec.clearValue();
   }
 
   return { warnings };
@@ -700,12 +715,13 @@ app.post("/api/structure", async (req, res) => {
 
     // (2.4a) DOM sections から会社名を優先取得（rawText依存より信頼性が高い）
     const evidenceSkipFields = new Set<string>();
+    let domSectionsForEvidence: Array<{ label: string; value: string }> = [];
     try {
       const sectionsPath = path.join(artifactDir, "extracted_sections.json");
       if (fs.existsSync(sectionsPath)) {
         const secData = JSON.parse(fs.readFileSync(sectionsPath, "utf8"));
-        const secs: Array<{ label: string; value: string }> = secData.sections ?? [];
-        const compSec = secs.find((s) => s.label === "会社名");
+        domSectionsForEvidence = secData.sections ?? [];
+        const compSec = domSectionsForEvidence.find((s) => s.label === "会社名");
         if (compSec && compSec.value.trim()) {
           sanitized.company.name = compSec.value.trim();
           evidenceSkipFields.add("company.name");
@@ -714,8 +730,8 @@ app.post("/api/structure", async (req, res) => {
       }
     } catch { /* sections 読み込み失敗時は OpenAI フォールバック */ }
 
-    // (2.5) evidence 検証: rawText 内に根拠が無い項目を無効化
-    const evidenceResult = validateEvidence(sanitized, normalizedText, evidenceSkipFields);
+    // (2.5) evidence 検証: rawText + DOM sections を証拠として使用
+    const evidenceResult = validateEvidence(sanitized, normalizedText, evidenceSkipFields, domSectionsForEvidence);
     const warnings: string[] = [...evidenceResult.warnings];
 
     // (2.5b) DOM sections によるフィールド補完 + ソース追跡
@@ -1279,8 +1295,13 @@ app.post("/api/generate", async (req, res) => {
       }
     }
 
-    // evidence 検証: rawText 内に根拠が無い項目を無効化
-    const evidenceResult = validateEvidence(sanitized, normalized, genEvidenceSkipFields);
+    // evidence 検証: rawText + DOM sections を証拠として使用
+    const evidenceResult = validateEvidence(
+      sanitized,
+      normalized,
+      genEvidenceSkipFields,
+      Array.isArray(genSections) ? genSections as Array<{ label: string; value: string }> : undefined
+    );
     const warnings: string[] = [...evidenceResult.warnings];
 
     // DOM sections によるフィールド補完（generate経路）
