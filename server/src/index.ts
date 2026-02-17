@@ -1,9 +1,7 @@
 import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import crypto from "node:crypto";
-import { exec } from "node:child_process";
 import express from "express";
 import cors from "cors";
 import { generateJobPosting, generateScoutText } from "./openai.js";
@@ -513,109 +511,114 @@ const resolveRunDir = (runId: string): string | null => {
 };
 
 // ---------------------------------------------------------------------------
-// ユーザー設定の永続化（user_settings.json）
+// storage.json — 保存先フォルダ設定（サーバー側で完結）
+//   環境変数 STORAGE_CONFIG_PATH で差し替え可能
 // ---------------------------------------------------------------------------
-const USER_SETTINGS_PATH = path.resolve(process.cwd(), "config", "user_settings.json");
+const STORAGE_CONFIG_PATH: string = (() => {
+  const env = process.env.STORAGE_CONFIG_PATH?.trim();
+  if (env) return path.isAbsolute(env) ? env : path.resolve(process.cwd(), env);
+  return path.resolve(process.cwd(), "config", "storage.json");
+})();
 
-interface UserSettings {
-  wordOutputDir: string;
-  textOutputDir: string;
+interface StorageConfig {
+  jobDocxDir: string;
+  scoutTextDir: string;
 }
 
-const loadUserSettings = (): UserSettings => {
+const loadStorageConfig = (): StorageConfig => {
   try {
-    const raw = fs.readFileSync(USER_SETTINGS_PATH, "utf8");
+    const raw = fs.readFileSync(STORAGE_CONFIG_PATH, "utf8");
     const data = JSON.parse(raw);
     return {
-      wordOutputDir: data.wordOutputDir || "",
-      textOutputDir: data.textOutputDir || "",
+      jobDocxDir: data.jobDocxDir || "",
+      scoutTextDir: data.scoutTextDir || "",
     };
   } catch {
-    return { wordOutputDir: "", textOutputDir: "" };
+    // 初回: デフォルト値で storage.json を生成
+    const defaults: StorageConfig = {
+      jobDocxDir: path.resolve(process.cwd(), "data", "output", "docx"),
+      scoutTextDir: path.resolve(process.cwd(), "data", "output", "text"),
+    };
+    try {
+      fs.mkdirSync(path.dirname(STORAGE_CONFIG_PATH), { recursive: true });
+      fs.writeFileSync(STORAGE_CONFIG_PATH, JSON.stringify(defaults, null, 2), "utf8");
+      log("storage", `storage.json を初期生成: ${STORAGE_CONFIG_PATH}`, defaults as unknown as Record<string, unknown>);
+    } catch { /* ignore */ }
+    return defaults;
   }
 };
 
-const saveUserSettings = (settings: UserSettings): void => {
-  const dir = path.dirname(USER_SETTINGS_PATH);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(USER_SETTINGS_PATH, JSON.stringify(settings, null, 2), "utf8");
+/** 起動時にディレクトリを自動作成 */
+const ensureStorageDirs = (): void => {
+  const cfg = loadStorageConfig();
+  if (cfg.jobDocxDir) {
+    fs.mkdirSync(cfg.jobDocxDir, { recursive: true });
+    log("storage", `jobDocxDir 確認/作成: ${cfg.jobDocxDir}`);
+  }
+  if (cfg.scoutTextDir) {
+    fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
+    log("storage", `scoutTextDir 確認/作成: ${cfg.scoutTextDir}`);
+  }
 };
 
 // ---------------------------------------------------------------------------
-// Windows フォルダ選択ダイアログ（PowerShell 経由）
+// ファイル保存（render 完了後に呼び出し）
+//   server 側で直接書き込み — chrome.downloads は使わない
 // ---------------------------------------------------------------------------
-const showFolderDialog = (initialDir?: string): Promise<string> => {
-  return new Promise((resolve) => {
-    const lines = [
-      "Add-Type -AssemblyName System.Windows.Forms",
-      "$d = New-Object System.Windows.Forms.FolderBrowserDialog",
-      `$d.Description = '保存先フォルダを選択してください'`,
-      initialDir ? `$d.SelectedPath = '${initialDir.replace(/'/g, "''")}'` : "",
-      "if($d.ShowDialog() -eq 'OK'){ Write-Host $d.SelectedPath }",
-    ].filter(Boolean).join("; ");
-    const tmpFile = path.join(os.tmpdir(), `museum_folder_${Date.now()}.ps1`);
-    fs.writeFileSync(tmpFile, lines, "utf8");
-    exec(
-      `powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpFile}"`,
-      { timeout: 120_000 },
-      (err, stdout) => {
-        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-        if (err) { resolve(""); return; }
-        resolve(stdout.trim());
-      },
-    );
-  });
-};
-
-// ---------------------------------------------------------------------------
-// ファイルコピー（render 完了後に呼び出し）
-// ---------------------------------------------------------------------------
-interface CopyResult {
-  copiedFiles: string[];
+interface SaveResult {
+  savedFiles: string[];
   errors: string[];
 }
 
-const copyOutputFiles = (
+const saveToOutputDirs = (
   artifactDir: string,
   suggestedFilename: string,
   scoutText: string | null,
-): CopyResult => {
-  const settings = loadUserSettings();
-  const copiedFiles: string[] = [];
+): SaveResult => {
+  const cfg = loadStorageConfig();
+  const savedFiles: string[] = [];
   const errors: string[] = [];
 
-  // --- Word 保存先 ---
-  if (settings.wordOutputDir) {
+  // --- Word (docx) ---
+  if (cfg.jobDocxDir) {
     try {
-      fs.mkdirSync(settings.wordOutputDir, { recursive: true });
+      fs.mkdirSync(cfg.jobDocxDir, { recursive: true });
       const srcDocx = path.join(artifactDir, "output.docx");
       if (fs.existsSync(srcDocx)) {
-        const destDocx = path.join(settings.wordOutputDir, suggestedFilename);
-        fs.copyFileSync(srcDocx, destDocx);
-        copiedFiles.push(destDocx);
-        log("copy", `Word保存: ${destDocx}`);
-      }
-      // スカウト文も Word 保存先に
-      if (scoutText) {
-        const scoutFilename = suggestedFilename
-          .replace(/\.docx$/i, "")
-          .replace(/^求人票_/, "スカウト文_") + ".txt";
-        const destScout = path.join(settings.wordOutputDir, scoutFilename);
-        fs.writeFileSync(destScout, scoutText, "utf8");
-        copiedFiles.push(destScout);
-        log("copy", `スカウト文保存: ${destScout}`);
+        const dest = path.join(cfg.jobDocxDir, suggestedFilename);
+        fs.copyFileSync(srcDocx, dest);
+        savedFiles.push(dest);
+        log("save", `Word保存: ${dest}`);
       }
     } catch (e) {
-      const msg = `Word保存先コピー失敗: ${e instanceof Error ? e.message : String(e)}`;
-      log("copy", msg);
+      const msg = `Word保存失敗: ${e instanceof Error ? e.message : String(e)}`;
+      log("save", msg);
       errors.push(msg);
     }
   }
 
-  // --- テキスト保存先 ---
-  if (settings.textOutputDir) {
+  // --- スカウト文 (txt) — scoutTextDir へ ---
+  if (cfg.scoutTextDir && scoutText) {
     try {
-      fs.mkdirSync(settings.textOutputDir, { recursive: true });
+      fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
+      const scoutFilename = suggestedFilename
+        .replace(/\.docx$/i, "")
+        .replace(/^求人票_/, "スカウト文_") + ".txt";
+      const dest = path.join(cfg.scoutTextDir, scoutFilename);
+      fs.writeFileSync(dest, scoutText, "utf8");
+      savedFiles.push(dest);
+      log("save", `スカウト文保存: ${dest}`);
+    } catch (e) {
+      const msg = `スカウト文保存失敗: ${e instanceof Error ? e.message : String(e)}`;
+      log("save", msg);
+      errors.push(msg);
+    }
+  }
+
+  // --- テキスト系 (json, md) — scoutTextDir へ ---
+  if (cfg.scoutTextDir) {
+    try {
+      fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
       const baseName = suggestedFilename.replace(/\.docx$/i, "");
       const textFiles: Array<{ src: string; destName: string }> = [
         { src: "job.json", destName: `${baseName}.json` },
@@ -625,20 +628,20 @@ const copyOutputFiles = (
       for (const { src, destName } of textFiles) {
         const srcPath = path.join(artifactDir, src);
         if (fs.existsSync(srcPath)) {
-          const destPath = path.join(settings.textOutputDir, destName);
+          const destPath = path.join(cfg.scoutTextDir, destName);
           fs.copyFileSync(srcPath, destPath);
-          copiedFiles.push(destPath);
-          log("copy", `テキスト保存: ${destPath}`);
+          savedFiles.push(destPath);
+          log("save", `テキスト保存: ${destPath}`);
         }
       }
     } catch (e) {
-      const msg = `テキスト保存先コピー失敗: ${e instanceof Error ? e.message : String(e)}`;
-      log("copy", msg);
+      const msg = `テキスト保存失敗: ${e instanceof Error ? e.message : String(e)}`;
+      log("save", msg);
       errors.push(msg);
     }
   }
 
-  return { copiedFiles, errors };
+  return { savedFiles, errors };
 };
 
 // ---------------------------------------------------------------------------
@@ -1279,53 +1282,21 @@ app.get("/api/preview", (req, res) => {
 });
 
 // ===========================================================================
-// GET /api/settings — ユーザー設定（保存先フォルダ等）を返す
+// GET /api/storage — 保存先フォルダ設定を返す（読み取り専用）
 // ===========================================================================
-app.get("/api/settings", (_req, res) => {
+app.get("/api/storage", (_req, res) => {
   try {
-    const settings = loadUserSettings();
-    return res.json(settings);
+    const cfg = loadStorageConfig();
+    return res.json(cfg);
   } catch (e) {
     return res.status(500).json({ error: { message: String(e) } });
-  }
-});
-
-// ===========================================================================
-// POST /api/settings — ユーザー設定を保存
-// ===========================================================================
-app.post("/api/settings", (req, res) => {
-  try {
-    const { wordOutputDir, textOutputDir } = req.body ?? {};
-    const settings: UserSettings = {
-      wordOutputDir: (wordOutputDir ?? "").trim(),
-      textOutputDir: (textOutputDir ?? "").trim(),
-    };
-    saveUserSettings(settings);
-    log("settings", "ユーザー設定保存", settings as unknown as Record<string, unknown>);
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(500).json({ error: { message: String(e) } });
-  }
-});
-
-// ===========================================================================
-// POST /api/select-folder — フォルダ選択ダイアログを表示（Windows）
-// ===========================================================================
-app.post("/api/select-folder", async (req, res) => {
-  try {
-    const initial = (req.body?.currentPath ?? "").trim() || undefined;
-    const selected = await showFolderDialog(initial);
-    return res.json({ path: selected });
-  } catch (e) {
-    log("select-folder", `フォルダ選択エラー: ${String(e)}`);
-    return res.json({ path: "" });
   }
 });
 
 // ===========================================================================
 // POST /api/render
 //   入力: { runId, approve: true }
-//   出力: { docx (base64), scoutText, suggestedFilename, copiedFiles, meta }
+//   出力: { savedFiles, saveErrors, suggestedFilename, meta }
 //   保存済み job.json → テンプレ差し込み → output.docx 保存 → 返却
 // ===========================================================================
 app.post("/api/render", async (req, res) => {
@@ -1467,15 +1438,13 @@ app.post("/api/render", async (req, res) => {
 
     const suggestedFilename = buildSuggestedFilename(sanitized.position.title, sanitized.position.title, sanitized.company.displayName ?? sanitized.company.name);
 
-    // ユーザー指定フォルダへコピー
-    const copyResult = copyOutputFiles(artifactDir, suggestedFilename, scoutText);
+    // storage.json の保存先へ書き出し
+    const saveResult = saveToOutputDirs(artifactDir, suggestedFilename, scoutText);
 
     return res.json({
-      docx: docxBuffer.toString("base64"),
-      scoutText,
       suggestedFilename,
-      copiedFiles: copyResult.copiedFiles,
-      copyErrors: copyResult.errors,
+      savedFiles: saveResult.savedFiles,
+      saveErrors: saveResult.errors,
       meta: { warnings: sanitized.compliance?.warnings ?? [] },
     });
   } catch (error) {
@@ -1836,8 +1805,18 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
+// 起動時に保存先ディレクトリを確認/作成
+try {
+  ensureStorageDirs();
+} catch (e) {
+  console.error("[storage] 保存先ディレクトリ作成失敗:", e);
+}
+
 app.listen(port, () => {
+  const cfg = loadStorageConfig();
   console.log(`Museum JobTool Ver 0.3.6 — Server listening on port ${port}`);
+  console.log(`  jobDocxDir:   ${cfg.jobDocxDir}`);
+  console.log(`  scoutTextDir: ${cfg.scoutTextDir}`);
   if (OUTPUT_DIR) console.log(`  OUTPUT_DIR: ${OUTPUT_DIR}`);
   if (ENABLE_COMPANY_STATIC) console.log(`  ENABLE_COMPANY_STATIC: ON`);
   if (STRICT_NO_PARAPHRASE) console.log(`  STRICT_NO_PARAPHRASE: ON (言い換え検出で停止)`);

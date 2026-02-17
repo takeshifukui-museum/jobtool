@@ -1,28 +1,12 @@
 // MV3 Service Worker: background.js
-// NOTE: Top-level return/await 禁止。createObjectURL 禁止。
+// ファイル保存は server 側で完結。extension は API 呼び出しと結果表示のみ。
 
 const API_BASE = "http://localhost:3000";
 const API_EXTRACT = `${API_BASE}/api/extract`;
 const API_STRUCTURE = `${API_BASE}/api/structure`;
 const API_RENDER = `${API_BASE}/api/render`;
-const API_GENERATE = `${API_BASE}/api/generate`; // 互換（使う場合のみ）
 
 console.log("[background] service worker loaded");
-
-const sanitizePathPart = (s) => {
-  return String(s || "")
-    .replace(/[\\/:*?"<>|]/g, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[ .]+$/g, "");
-};
-
-const buildDownloadFilename = (suggestedFilename) => {
-  const fallback = "求人票_求人情報.docx";
-  const safeFile = sanitizePathPart(suggestedFilename || fallback) || fallback;
-  const file = safeFile.toLowerCase().endsWith(".docx") ? safeFile : `${safeFile}.docx`;
-  return file;
-};
 
 const apiPost = async (url, body) => {
   const response = await fetch(url, {
@@ -74,11 +58,8 @@ const extractFromTab = async (tabId) => {
   }
 };
 
-const base64ToDataUrl = (base64, mime) => {
-  return `data:${mime};base64,${base64}`;
-};
-
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Step 1: extract → structure → プレビュー
   if (message?.type === "GENERATE_JOB_PREVIEW") {
     chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
       try {
@@ -106,7 +87,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: true,
           runId: structureResult.runId,
-          sessionId: structureResult.runId, // 旧互換
+          sessionId: structureResult.runId,
           job: structureResult.job,
           structuredMd: structureResult.structuredMd,
           suggestedFilename: structureResult.suggestedFilename,
@@ -119,11 +100,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Step 2: render → サーバー側で保存完了
   if (message?.type === "RENDER_JOB_DOCX") {
     (async () => {
       try {
         const runId = message.runId || message.sessionId;
-        const { suggestedFilename } = message;
         if (!runId) {
           sendResponse({ ok: false, message: "runId がありません" });
           return;
@@ -131,53 +112,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const data = await apiPost(API_RENDER, { runId, approve: true });
 
-        // サーバーがユーザー指定フォルダへコピー済みの場合
-        const copiedFiles = data.copiedFiles ?? [];
-        const hasWordCopy = copiedFiles.some((f) => f.endsWith(".docx"));
+        const savedFiles = data.savedFiles ?? [];
+        const saveErrors = data.saveErrors ?? [];
 
-        if (hasWordCopy) {
-          // Word はサーバー側で保存済み → chrome.downloads 不要
-          // スカウト文もサーバー側で保存済み
-          console.log("[background] files copied by server:", copiedFiles);
-          sendResponse({ ok: true, message: "保存しました", copiedFiles });
-          return;
+        console.log("[background] server saved files:", savedFiles);
+        if (saveErrors.length > 0) {
+          console.warn("[background] save errors:", saveErrors);
         }
 
-        // フォルダ未指定（後方互換）: chrome.downloads で保存
-        const filename = buildDownloadFilename(data.suggestedFilename || suggestedFilename);
-        const mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-
-        // objectURL を使わず data: URL で downloads に渡す
-        const dataUrl = base64ToDataUrl(data.docx, mime);
-
-        chrome.downloads.download({ url: dataUrl, filename, saveAs: true }, (downloadId) => {
-          if (chrome.runtime.lastError) {
-            const err = chrome.runtime.lastError.message || "unknown download error";
-            console.error("[background] download failed:", err);
-            sendResponse({ ok: false, message: `download failed: ${err}` });
-            return;
-          }
-          console.log("[background] download started, id:", downloadId);
-
-          // スカウト文を .txt として同じフォルダに保存（UI非表示、ファイル出力のみ）
-          if (data.scoutText) {
-            try {
-              const txtFilename = filename.replace(/\.docx$/i, "").replace(/^求人票_/, "スカウト文_") + ".txt";
-              const txtBase64 = btoa(unescape(encodeURIComponent(data.scoutText)));
-              const txtDataUrl = `data:text/plain;charset=utf-8;base64,${txtBase64}`;
-              chrome.downloads.download({ url: txtDataUrl, filename: txtFilename, saveAs: false }, (txtId) => {
-                if (chrome.runtime.lastError) {
-                  console.warn("[background] scout text download failed:", chrome.runtime.lastError.message);
-                } else {
-                  console.log("[background] scout text saved, id:", txtId);
-                }
-              });
-            } catch (e) {
-              console.warn("[background] scout text save error:", e);
-            }
-          }
-
-          sendResponse({ ok: true, message: "ダウンロードしました" });
+        sendResponse({
+          ok: true,
+          message: savedFiles.length > 0 ? "保存しました" : "保存先未設定",
+          savedFiles,
+          saveErrors,
         });
       } catch (error) {
         sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
@@ -186,7 +133,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // unknown message
   sendResponse({ ok: false, message: "unknown message type" });
   return false;
 });

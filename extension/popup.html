@@ -11,7 +11,6 @@
         max-width: 500px;
       }
       label { font-size: 12px; }
-      input[type="text"] { width: 100%; margin: 4px 0; box-sizing: border-box; }
       button {
         width: 100%;
         padding: 8px;
@@ -76,67 +75,9 @@
         margin-top: 8px;
       }
       .btn-row button { width: auto; flex: 1; }
-      /* --- 保存先フォルダ設定 --- */
-      .folder-settings {
-        margin-bottom: 8px;
-        border: 1px solid #e5e7eb;
-        border-radius: 4px;
-        padding: 8px;
-        background: #f9fafb;
-      }
-      .folder-settings .folder-heading {
-        font-size: 11px;
-        font-weight: bold;
-        color: #6b7280;
-        margin-bottom: 4px;
-      }
-      .folder-row {
-        margin-bottom: 4px;
-      }
-      .folder-row:last-child {
-        margin-bottom: 0;
-      }
-      .input-with-btn {
-        display: flex;
-        gap: 4px;
-        align-items: center;
-      }
-      .input-with-btn input[type="text"] {
-        flex: 1;
-        margin: 2px 0;
-        font-size: 11px;
-      }
-      .btn-browse {
-        width: auto !important;
-        padding: 4px 8px !important;
-        font-size: 11px !important;
-        margin-top: 0 !important;
-        white-space: nowrap;
-        background: #e5e7eb;
-        border: 1px solid #d1d5db;
-        border-radius: 3px;
-      }
     </style>
   </head>
   <body>
-    <div class="folder-settings">
-      <div class="folder-heading">出力先フォルダ</div>
-      <div class="folder-row">
-        <label>Word保存先</label>
-        <div class="input-with-btn">
-          <input type="text" id="word-output-dir" placeholder="未指定（ダウンロード時に選択）" />
-          <button type="button" id="btn-browse-word" class="btn-browse">参照</button>
-        </div>
-      </div>
-      <div class="folder-row">
-        <label>テキスト保存先</label>
-        <div class="input-with-btn">
-          <input type="text" id="text-output-dir" placeholder="未指定" />
-          <button type="button" id="btn-browse-text" class="btn-browse">参照</button>
-        </div>
-      </div>
-    </div>
-
     <button id="btn-generate">求人票を解析</button>
 
     <div id="warnings"></div>
