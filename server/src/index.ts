@@ -146,7 +146,7 @@ const validateEvidence = (
     if (skipFields?.has(spec.fieldLabel)) continue; // DOM sections 優先取得済み → スキップ
 
     const value = spec.getValue();
-    if (!value.trim()) continue; // 値が空ならチェック不要
+    if (!value?.trim()) continue; // 値が空またはundefinedならチェック不要
 
     const ev = (spec.evidence ?? "").trim();
     if (!ev) {
