@@ -20,9 +20,9 @@ import {
   WidthType
 } from "docx";
 import { JobPosting } from "./schema.js";
-import { listToText } from "./extract.js";
+import { listToText, formatPostalCode, formatPostalCodeLineBreak, formatReadability, formatBullets } from "./extract.js";
 
-const keepLabels = ["賃金", "給与", "業務内容", "求める経験・スキル"];
+const keepLabels = ["賃金", "業務内容", "求める経験・スキル"];
 
 const removeEmptyRows = (docxBuffer: Buffer): Buffer => {
   const zip = new PizZip(docxBuffer);
@@ -59,6 +59,37 @@ const removeEmptyRows = (docxBuffer: Buffer): Buffer => {
   return zip.generate({ type: "nodebuffer" });
 };
 
+// ---------------------------------------------------------------------------
+// テンプレモード: タイトルブロックを先頭に挿入（XML操作）
+// テンプレートに {company.name} 等が無い場合でもタイトルが必ず表示される
+// ---------------------------------------------------------------------------
+const escapeXml = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const prependTitleBlock = (docxBuffer: Buffer, companyName: string, positionTitle: string): Buffer => {
+  try {
+    const zip = new PizZip(docxBuffer);
+    const xml = zip.file("word/document.xml")?.asText();
+    if (!xml) return docxBuffer;
+
+    // 既にタイトルが含まれている場合はスキップ（二重挿入防止）
+    if (xml.includes(">求人票<")) return docxBuffer;
+
+    const titleParas = [
+      `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="48"/><w:rFonts w:ascii="${BIZ_UDP_GOTHIC}" w:eastAsia="${BIZ_UDP_GOTHIC}"/></w:rPr><w:t>求人票</w:t></w:r></w:p>`,
+      `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:sz w:val="28"/><w:rFonts w:ascii="${BIZ_UDP_GOTHIC}" w:eastAsia="${BIZ_UDP_GOTHIC}"/></w:rPr><w:t>${escapeXml(companyName)}</w:t></w:r></w:p>`,
+      `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:sz w:val="28"/><w:rFonts w:ascii="${BIZ_UDP_GOTHIC}" w:eastAsia="${BIZ_UDP_GOTHIC}"/></w:rPr><w:t>${escapeXml(positionTitle)}</w:t></w:r></w:p>`,
+      `<w:p/>`,
+    ].join("");
+
+    const updated = xml.replace(/<w:body>/, `<w:body>${titleParas}`);
+    zip.file("word/document.xml", updated);
+    return zip.generate({ type: "nodebuffer" });
+  } catch {
+    return docxBuffer; // XML操作失敗時はそのまま返す
+  }
+};
+
 const isTemplateLikelyBlank = (template: Buffer): boolean => {
   try {
     const zip = new PizZip(template);
@@ -67,13 +98,58 @@ const isTemplateLikelyBlank = (template: Buffer): boolean => {
     const hasTemplateTag = xml.includes("{") && xml.includes("}");
     return !hasTextNode && !hasTemplateTag;
   } catch {
-    // 破損zipは別の箇所で弾くので、ここでは「空扱い」にはしない
     return false;
   }
 };
 
+// ---------------------------------------------------------------------------
+// レイアウト固定値（Museumルール: AIにレイアウト判断させない）
+// ---------------------------------------------------------------------------
 const BIZ_UDP_GOTHIC = "BIZ UDPゴシック";
 const LOGO_NAME = "museum_logo.png";
+const LEFT_DXA = 2000;   // ラベル列幅 (1)
+const RIGHT_DXA = 10000; // 値列幅 (5) → 比率 1:5
+const BORDER_SIZE = 4;   // 0.5pt (OOXML: 1/8pt 単位 → 4 = 0.5pt)
+const BORDER_COLOR = "000000"; // 黒
+const MARGIN_TWIPS = 720; // 余白「狭い」(0.5inch = 720twips)
+
+const BORDERS = {
+  top:              { style: BorderStyle.SINGLE, size: BORDER_SIZE, color: BORDER_COLOR },
+  bottom:           { style: BorderStyle.SINGLE, size: BORDER_SIZE, color: BORDER_COLOR },
+  left:             { style: BorderStyle.SINGLE, size: BORDER_SIZE, color: BORDER_COLOR },
+  right:            { style: BorderStyle.SINGLE, size: BORDER_SIZE, color: BORDER_COLOR },
+  insideHorizontal: { style: BorderStyle.SINGLE, size: BORDER_SIZE, color: BORDER_COLOR },
+  insideVertical:   { style: BorderStyle.SINGLE, size: BORDER_SIZE, color: BORDER_COLOR }
+};
+
+// ---------------------------------------------------------------------------
+// 固定の行順序（Canonical Key 使用 — Ver 0.3）
+//   賃金 ← 給与 / 年収 / 月給 / 年収・待遇 / 報酬
+//   就業時間 ← 勤務時間 / 就業時間
+//   就業場所 ← 勤務地 / 配属先
+//   同一keyは1回のみ出力。
+// ---------------------------------------------------------------------------
+const FIXED_ROW_ORDER = [
+  "業務内容",
+  "求める経験・スキル",
+  "雇用形態",
+  "契約期間",
+  "試用期間",
+  "就業場所",
+  "就業時間",
+  "休憩時間",
+  "休日休暇",
+  "時間外労働",
+  "賃金",
+  // 固定残業代は賃金欄に集約（独立行は廃止）
+  "社会保険",
+  "福利厚生",
+  "選考プロセス"
+] as const;
+
+// ---------------------------------------------------------------------------
+// ヘルパー
+// ---------------------------------------------------------------------------
 
 const resolveLogoPath = (): string | null => {
   const dirFromThisFile = path.dirname(fileURLToPath(import.meta.url));
@@ -105,6 +181,18 @@ const loadLogo = (): { data: Buffer; path: string } | null => {
   }
 };
 
+/** PNG の IHDR チャンクから画像サイズを取得 */
+const readPngDimensions = (buf: Buffer): { width: number; height: number } | null => {
+  // PNG: 8-byte signature + IHDR chunk (4 len + 4 "IHDR" + 4 width + 4 height)
+  if (buf.length < 24) return null;
+  const w = buf.readUInt32BE(16);
+  const h = buf.readUInt32BE(20);
+  if (w === 0 || h === 0) return null;
+  return { width: w, height: h };
+};
+
+const LOGO_TARGET_WIDTH = 220;
+
 const makeRun = (text: string, opts?: { bold?: boolean; size?: number }) => {
   return new TextRun({
     text,
@@ -117,53 +205,43 @@ const makeRun = (text: string, opts?: { bold?: boolean; size?: number }) => {
 type AlignmentValue = (typeof AlignmentType)[keyof typeof AlignmentType];
 
 const makeCell = (text: string, opts?: { bold?: boolean; align?: AlignmentValue; widthDxa?: number }) => {
+  // 改行を含むテキストは複数 Paragraph に分割
+  const lines = text.split("\n");
+  const children = lines.map(
+    (line) =>
+      new Paragraph({
+        alignment: opts?.align ?? AlignmentType.LEFT,
+        children: [makeRun(line, { bold: opts?.bold })]
+      })
+  );
   return new TableCell({
     verticalAlign: VerticalAlign.CENTER,
     width: opts?.widthDxa ? { size: opts.widthDxa, type: WidthType.DXA } : undefined,
-    children: [
-      new Paragraph({
-        alignment: opts?.align ?? AlignmentType.LEFT,
-        children: [makeRun(text, { bold: opts?.bold })]
-      })
-    ]
+    children
   });
-};
-
-const buildAtsOrder = (rawText?: string): string[] => {
-  const text = String(rawText ?? "");
-  if (!text) return [];
-  const keys: Array<{ key: string; patterns: RegExp[] }> = [
-    { key: "job", patterns: [/業務内容/g, /仕事内容/g] },
-    { key: "skills", patterns: [/求める経験・スキル/g, /求めるスキル/g, /必須スキル/g, /歓迎スキル/g, /応募資格/g] },
-    { key: "work", patterns: [/勤務地/g, /勤務時間/g, /就業時間/g, /休憩/g, /勤務条件/g] },
-    { key: "holidays", patterns: [/休日休暇/g, /休日/g] },
-    { key: "salary", patterns: [/給与/g, /賃金/g, /年収/g, /月給/g] },
-    { key: "benefits", patterns: [/福利厚生/g, /待遇/g] },
-    { key: "insurance", patterns: [/社会保険/g, /保険/g] },
-    { key: "selection", patterns: [/選考/g, /選考プロセス/g] }
-  ];
-  const found: Array<{ key: string; idx: number }> = [];
-  for (const k of keys) {
-    let min = Number.POSITIVE_INFINITY;
-    for (const p of k.patterns) {
-      const m = p.exec(text);
-      if (m && typeof m.index === "number") {
-        min = Math.min(min, m.index);
-      }
-      p.lastIndex = 0;
-    }
-    if (min !== Number.POSITIVE_INFINITY) found.push({ key: k.key, idx: min });
-  }
-  return found.sort((a, b) => a.idx - b.idx).map((x) => x.key);
 };
 
 const joinSkillBlock = (must: string[], want: string[]): string => {
   const mustText = listToText(must);
   const wantText = listToText(want);
   const parts: string[] = [];
-  if (mustText) parts.push("【必須】\n" + mustText);
-  if (wantText) parts.push("【歓迎】\n" + wantText);
+  if (mustText) parts.push("【必須】\n" + formatBullets(mustText));
+  if (wantText) parts.push("【歓迎】\n" + formatBullets(wantText));
   return parts.join("\n\n");
+};
+
+// ---------------------------------------------------------------------------
+// 賃金詳細の重複排除: summary に details 内容が含まれていたら details を省略
+// ---------------------------------------------------------------------------
+const isSalaryDetailsRedundant = (summary: string, details: string[]): boolean => {
+  if (!details || details.length === 0) return true;
+  const normSummary = summary.replace(/[\s\u3000・\-−–—,、。．]/g, "");
+  if (!normSummary) return false;
+  // details の全行が summary に含まれていれば冗長
+  return details.every((d) => {
+    const normD = d.replace(/[\s\u3000・\-−–—,、。．]/g, "");
+    return !normD || normSummary.includes(normD);
+  });
 };
 
 const buildJobBlock = (job: JobPosting["job"]): string => {
@@ -177,96 +255,107 @@ const buildJobBlock = (job: JobPosting["job"]): string => {
   return lines.join("\n\n").trim();
 };
 
-const renderJobDocxFromScratch = async (job: JobPosting, opts?: { rawText?: string; jobTitle?: string }): Promise<Buffer> => {
-  const borders = {
-    top: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
-    bottom: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
-    left: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
-    right: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
-    insideHorizontal: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
-    insideVertical: { style: BorderStyle.SINGLE, size: 4, color: "000000" }
-  };
+// ---------------------------------------------------------------------------
+// render直前の可読性整形 + 郵便番号整形
+// ---------------------------------------------------------------------------
+const applyRenderFormatting = (text: string): string => {
+  return formatReadability(formatPostalCode(text));
+};
 
-  const fixedOvertimeText = job.salary.fixedOvertime
-    ? [
-        `固定残業代: ${job.salary.fixedOvertime.includedHours}`,
-        `超過分: ${job.salary.fixedOvertime.excessPayment}`,
-        job.salary.fixedOvertime.notes
-      ]
-        .filter(Boolean)
-        .join("\n")
-    : "";
+// ---------------------------------------------------------------------------
+// コード生成パス（テンプレートが無い/空の場合）
+// 重要: 固定順序。ATS順推定は行わない。
+// ---------------------------------------------------------------------------
+
+const renderJobDocxFromScratch = async (
+  job: JobPosting,
+  opts?: { jobTitle?: string; showFixedOvertime?: boolean }
+): Promise<Buffer> => {
 
   const overtimeText = job.work.overtime
     ? job.work.overtime.details
-      ? `時間外労働: ${job.work.overtime.details}`
+      ? job.work.overtime.details
       : job.work.overtime.exists
-        ? "時間外労働あり"
-        : "時間外労働なし"
+        ? "あり"
+        : ""
     : "";
 
-  // 必須: 賃金は空にしない（空の場合はサーバ側でエラーにする想定）
-  const baseRows: Record<string, Array<[string, string]>> = {
-    job: [["業務内容", buildJobBlock(job.job)]],
-    skills: [["求める経験・スキル", joinSkillBlock(job.requirements.must, job.requirements.want)]],
-    work: [
-      ["勤務地", job.work.location ?? ""],
-      ["勤務時間", job.work.hours ?? ""],
-      ["休憩時間", job.work.breakTime ?? ""],
-      ["契約期間", job.position.contractTerm ?? ""],
-      ["試用期間", job.position.probation ?? ""]
-    ],
-    holidays: [["休日休暇", job.work.holidays ?? ""]],
-    salary: [
-      ["賃金", job.salary.summary],
-      ["年収・待遇", listToText(job.salary.details)]
-    ],
-    benefits: [["福利厚生", listToText(job.benefits.items)]],
-    insurance: [["社会保険", job.insurance.socialInsurance ?? ""]],
-    selection: [["選考プロセス", job.selection.process ?? ""]]
+  // -----------------------------------------------------------------------
+  // 固定残業代: 原文に固定残業代関連語が存在する場合のみ表示
+  // 分割表示: 金額 / 時間数 / 超過分
+  // 未取得項目は出さない ただし表示可能部分は表示する
+  // -----------------------------------------------------------------------
+  const fo = job.salary.fixedOvertime;
+  const showFO = opts?.showFixedOvertime === true && fo;
+  const foAmount = showFO ? (fo.amount ?? "").trim() : "";
+  const foHours = showFO ? (fo.includedHours ?? "").trim() : "";
+  const foExcess = showFO ? (fo.excessPayment ?? "").trim() : "";
+
+  // -----------------------------------------------------------------------
+  // 固定残業代: 賃金欄に集約（独立行は出さない）
+  // -----------------------------------------------------------------------
+  const foAllEmpty = !foAmount && !foHours && !foExcess;
+
+  // -----------------------------------------------------------------------
+  // 賃金: details が summary の繰り返しなら省略
+  // -----------------------------------------------------------------------
+  const salSummary = applyRenderFormatting(job.salary?.summary ?? "");
+  const salDetails = job.salary?.details?.filter((x) => x?.trim()) ?? [];
+  const salDetailsText = isSalaryDetailsRedundant(job.salary?.summary ?? "", salDetails)
+    ? ""
+    : applyRenderFormatting(listToText(salDetails));
+
+  // 固定残業代を賃金欄に統合（重複出力防止）
+  const foLines: string[] = [];
+  if (!foAllEmpty) {
+    if (foAmount) foLines.push(`固定残業代: ${foAmount}`);
+    if (foHours) foLines.push(`固定残業時間数: ${foHours}`);
+    if (foExcess) foLines.push(`超過分: ${foExcess}`);
+  }
+  const salaryValue = [salSummary, salDetailsText, ...foLines].filter(Boolean).join("\n");
+
+  // 時間外労働: 固定残業代と同一内容が賃金に含まれている場合は時間外を空にする
+  const overtimeDisplay = (!foAllEmpty && overtimeText) ? "" : overtimeText;
+
+  // -----------------------------------------------------------------------
+  // 行データ構築（Canonical Key使用、空欄非表示）
+  // 固定残業代は賃金欄に集約済みのため独立行は出さない
+  // -----------------------------------------------------------------------
+  const rowData: Record<string, string> = {
+    "業務内容": applyRenderFormatting(formatBullets(buildJobBlock(job.job ?? {}))),
+    "求める経験・スキル": applyRenderFormatting(joinSkillBlock(job.requirements?.must ?? [], job.requirements?.want ?? [])),
+    "雇用形態": job.position?.employmentType ?? "",
+    "契約期間": job.position?.contractTerm ?? "",
+    "試用期間": job.position?.probation ?? "",
+    "就業場所": formatPostalCodeLineBreak(applyRenderFormatting(job.work?.location ?? "")),
+    "就業時間": applyRenderFormatting(job.work?.hours ?? ""),
+    "休憩時間": job.work?.breakTime ?? "",
+    "休日休暇": applyRenderFormatting(job.work?.holidays ?? ""),
+    "時間外労働": overtimeDisplay,
+    "賃金": salaryValue,
+    "社会保険": job.insurance?.socialInsurance ?? "",
+    "福利厚生": applyRenderFormatting(listToText(job.benefits?.items ?? [])),
+    "選考プロセス": job.selection?.process ?? ""
   };
 
-  // 条項順（ATS順）を rawText から推定して適用。見つからない場合は固定順。
-  const order = buildAtsOrder(opts?.rawText);
-  const defaultOrder = ["job", "skills", "work", "holidays", "salary", "benefits", "insurance", "selection"];
-  const keys = order.length > 0 ? order : defaultOrder;
-
+  // 固定順序で行を構築。空の行は出さない（valueが空 → 行を出さない）
+  // ただし「賃金」は必須項目のため常に表示
+  // 同一ラベルの複数回出力を防止（最初の1回のみ採用）
+  const REQUIRED_LABELS = ["賃金"];
   const rows: Array<[string, string]> = [];
-  for (const k of keys) {
-    const group = baseRows[k];
-    if (!group) continue;
-    for (const [label, value] of group) {
-      const v = String(value ?? "").trim();
-      // 「存在しない項目は生成しない」: 空は出さない（賃金は例外として必須）
-      if (!v && label !== "賃金") continue;
-      rows.push([label, v]);
-    }
-
-    // overtime は work/holidays 付近に来ることが多いので work グループの直後で差し込む
-    if (k === "work") {
-      if (overtimeText && overtimeText.trim() !== "") rows.push(["時間外労働", overtimeText]);
-      if (fixedOvertimeText && fixedOvertimeText.trim() !== "") rows.push(["固定残業代", fixedOvertimeText]);
-    }
+  const usedLabels = new Set<string>();
+  for (const label of FIXED_ROW_ORDER) {
+    if (usedLabels.has(label)) continue;
+    const value = (rowData[label] ?? "").trim();
+    if (!value && !REQUIRED_LABELS.includes(label)) continue;
+    rows.push([label, value]);
+    usedLabels.add(label);
   }
 
-  // 時間外労働は情報が無い場合は項目自体を削除（ルール遵守）
-  if (overtimeText && overtimeText.trim() !== "") {
-    rows.push(["時間外労働", overtimeText]);
+  if (rows.length === 0) {
+    throw new Error("Word生成に失敗: 差し込み可能な行が0件です。");
   }
 
-  rows.push(["賃金", job.salary.summary]);
-  rows.push(["賃金詳細", listToText(job.salary.details)]);
-
-  if (fixedOvertimeText && fixedOvertimeText.trim() !== "") {
-    rows.push(["固定残業代", fixedOvertimeText]);
-  }
-
-  rows.push(["社会保険", job.insurance.socialInsurance ?? ""]);
-  rows.push(["福利厚生", listToText(job.benefits.items)]);
-  rows.push(["選考プロセス", job.selection.process ?? ""]);
-
-  const LEFT_DXA = 2000; // 1
-  const RIGHT_DXA = 10000; // 5
   const tableRows = rows.map(([label, value]) => {
     return new TableRow({
       children: [
@@ -283,6 +372,7 @@ const renderJobDocxFromScratch = async (job: JobPosting, opts?: { rawText?: stri
     console.log(`[word] logo loaded`, { path: logo.path, size: logo.data.length });
   }
 
+  // ロゴ右上（ヘッダー）— アスペクト比を必ず維持（同倍率スケール）
   const headerChildren = logo
     ? [
         new Paragraph({
@@ -291,7 +381,18 @@ const renderJobDocxFromScratch = async (job: JobPosting, opts?: { rawText?: stri
             new ImageRun({
               type: "png",
               data: logo.data,
-              transformation: { width: 220, height: 56 }
+              transformation: (() => {
+                const dim = readPngDimensions(logo.data);
+                if (dim) {
+                  const scale = LOGO_TARGET_WIDTH / dim.width;
+                  const w = Math.round(dim.width * scale);
+                  const h = Math.round(dim.height * scale);
+                  console.log(`[word] logo transformation: original=${dim.width}x${dim.height} → display=${w}x${h} (scale=${scale.toFixed(4)})`);
+                  return { width: w, height: h };
+                }
+                console.warn("[word] logo PNG dimensions unreadable – using fallback 220x69");
+                return { width: LOGO_TARGET_WIDTH, height: 69 };
+              })()
             })
           ]
         })
@@ -299,6 +400,7 @@ const renderJobDocxFromScratch = async (job: JobPosting, opts?: { rawText?: stri
     : [];
 
   // タイトル（24pt/太字/中央）＋企業名・ポジション名（中央）
+  const scratchDisplayName = job.company.displayName ?? job.company.name;
   const titleLines: Paragraph[] = [
     new Paragraph({
       alignment: AlignmentType.CENTER,
@@ -306,7 +408,7 @@ const renderJobDocxFromScratch = async (job: JobPosting, opts?: { rawText?: stri
     }),
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      children: [makeRun(job.company.name, { size: 28 })]
+      children: [makeRun(scratchDisplayName, { size: 28 })]
     }),
     new Paragraph({
       alignment: AlignmentType.CENTER,
@@ -320,7 +422,12 @@ const renderJobDocxFromScratch = async (job: JobPosting, opts?: { rawText?: stri
       {
         properties: {
           page: {
-            margin: { top: 720, bottom: 720, left: 720, right: 720 }
+            margin: {
+              top: MARGIN_TWIPS,
+              bottom: MARGIN_TWIPS,
+              left: MARGIN_TWIPS,
+              right: MARGIN_TWIPS
+            }
           }
         },
         headers: headerChildren.length > 0 ? { default: new Header({ children: headerChildren }) } : undefined,
@@ -328,7 +435,7 @@ const renderJobDocxFromScratch = async (job: JobPosting, opts?: { rawText?: stri
           ...titleLines,
           new Table({
             width: { size: 100, type: WidthType.PERCENTAGE },
-            borders,
+            borders: BORDERS,
             alignment: AlignmentType.CENTER,
             columnWidths: [LEFT_DXA, RIGHT_DXA],
             rows: tableRows
@@ -341,10 +448,14 @@ const renderJobDocxFromScratch = async (job: JobPosting, opts?: { rawText?: stri
   return await Packer.toBuffer(doc);
 };
 
+// ---------------------------------------------------------------------------
+// メインエントリ: テンプレ有無で分岐
+// ---------------------------------------------------------------------------
+
 export const renderJobDocx = async (
   job: JobPosting,
   templatePath: string,
-  opts?: { rawText?: string; jobTitle?: string }
+  opts?: { jobTitle?: string; showFixedOvertime?: boolean }
 ): Promise<Buffer> => {
   const template = fs.readFileSync(templatePath);
   if (template.length === 0) {
@@ -359,50 +470,59 @@ export const renderJobDocx = async (
   const parser = (expressionParser as any).configure({}) as any;
   const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true, parser } as any);
 
-  const fixedOvertimeText = job.salary.fixedOvertime
-    ? [
-        `固定残業代: ${job.salary.fixedOvertime.includedHours}`,
-        `超過分: ${job.salary.fixedOvertime.excessPayment}`,
-        job.salary.fixedOvertime.notes
-      ]
-        .filter(Boolean)
-        .join("\n")
-    : "";
+  const fo = job.salary.fixedOvertime;
+  const showFO = opts?.showFixedOvertime !== false && fo;
+  // 固定残業代は賃金欄に統合（テンプレモードも同様）
+  const foLines: string[] = [];
+  if (showFO) {
+    if (fo.amount?.trim()) foLines.push(`固定残業代: ${fo.amount.trim()}`);
+    if (fo.includedHours?.trim()) foLines.push(`固定残業時間数: ${fo.includedHours.trim()}`);
+    if (fo.excessPayment?.trim()) foLines.push(`超過分: ${fo.excessPayment.trim()}`);
+    if (fo.notes?.trim()) foLines.push(fo.notes.trim());
+  }
+  const hasFO = foLines.length > 0;
 
   const overtimeText = job.work.overtime
     ? job.work.overtime.details
-      ? `時間外労働: ${job.work.overtime.details}`
+      ? job.work.overtime.details
       : job.work.overtime.exists
-        ? "時間外労働あり"
-        : "時間外労働なし"
+        ? "あり"
+        : ""
     : "";
+  // 固定残業代が賃金に含まれる場合、時間外労働欄は空にする（重複防止）
+  const templateOvertimeText = hasFO ? "" : overtimeText;
 
+  const salSummaryTpl = applyRenderFormatting(job.salary?.summary ?? "");
+  const salDetailsTpl = applyRenderFormatting(listToText(job.salary?.details ?? []));
+  const salaryFullTpl = [salSummaryTpl, salDetailsTpl, ...foLines].filter(Boolean).join("\n");
+
+  const companyDisplayName = job.company?.displayName ?? job.company?.name ?? "";
   const data = {
-    company: { name: job.company.name },
-    position: { title: job.position.title, contractTerm: job.position.contractTerm ?? "" },
+    company: { name: companyDisplayName },
+    position: { title: job.position?.title ?? "", contractTerm: job.position?.contractTerm ?? "" },
     job: {
-      responsibilities_text: listToText(job.job.responsibilities),
-      notes: job.job.notes ?? ""
+      responsibilities_text: applyRenderFormatting(listToText(job.job?.responsibilities ?? [])),
+      notes: job.job?.notes ?? ""
     },
     requirements: {
-      must_text: listToText(job.requirements.must),
-      want_text: listToText(job.requirements.want)
+      must_text: applyRenderFormatting(listToText(job.requirements?.must ?? [])),
+      want_text: applyRenderFormatting(listToText(job.requirements?.want ?? []))
     },
     work: {
-      location: job.work.location ?? "",
-      hours: job.work.hours ?? "",
-      breakTime: job.work.breakTime ?? "",
-      holidays: job.work.holidays ?? "",
-      overtime_text: overtimeText
+      location: formatPostalCodeLineBreak(applyRenderFormatting(job.work?.location ?? "")),
+      hours: applyRenderFormatting(job.work?.hours ?? ""),
+      breakTime: job.work?.breakTime ?? "",
+      holidays: applyRenderFormatting(job.work?.holidays ?? ""),
+      overtime_text: templateOvertimeText
     },
     salary: {
-      summary: job.salary.summary,
-      details_text: listToText(job.salary.details),
-      fixedOvertime_text: fixedOvertimeText
+      summary: salaryFullTpl,
+      details_text: "",
+      fixedOvertime_text: ""
     },
-    insurance: { socialInsurance: job.insurance.socialInsurance ?? "" },
-    benefits: { items_text: listToText(job.benefits.items) },
-    selection: { process: job.selection.process ?? "" }
+    insurance: { socialInsurance: job.insurance?.socialInsurance ?? "" },
+    benefits: { items_text: applyRenderFormatting(listToText(job.benefits?.items ?? [])) },
+    selection: { process: job.selection?.process ?? "" }
   };
 
   try {
@@ -412,7 +532,9 @@ export const renderJobDocx = async (
     throw new Error(`Word差し込みに失敗しました: ${msg}`);
   }
   const rendered = doc.getZip().generate({ type: "nodebuffer" });
-  return removeEmptyRows(rendered);
+  const withEmptyRowsRemoved = removeEmptyRows(rendered);
+  // テンプレモードでもタイトル・企業名・ポジション名を必ず先頭に表示
+  return prependTitleBlock(withEmptyRowsRemoved, companyDisplayName, job.position.title || (opts?.jobTitle ?? ""));
 };
 
 const TEMPLATE_NAME = "museum_template.docx";
