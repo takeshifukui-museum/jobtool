@@ -174,7 +174,7 @@ export const extractBlockquoteSections = (rawHtml: string): ExtractedSection[] =
   const tokens = tokenizeHtml(rawHtml);
   const sections: ExtractedSection[] = [];
   const seen = new Set<string>();
-  const VALUE_TAGS = new Set(["ul", "ol", "p", "div"]);
+  const VALUE_TAGS = new Set(["ul", "ol", "p", "div", "li"]);
 
   const collectValue = (startIdx: number): string => {
     const parts: string[] = [];

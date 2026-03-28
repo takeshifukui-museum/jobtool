@@ -821,19 +821,23 @@ app.post("/api/extract", async (req, res) => {
     }
 
     // extracted_sections.json（DOM由来のセクション化データ）
-    if (Array.isArray(extractedSections) && extractedSections.length > 0) {
-      // blockquote / >記号セクションをマージ（rawHtml がある場合のみ）
+    {
+      const base = Array.isArray(extractedSections) ? extractedSections : [];
+      // blockquote / >記号セクションをマージ（rawHtml がある場合）
+      // base が空でも rawHtml があれば blockquote 抽出を実行する
       const mergedResult =
         rawHtml && typeof rawHtml === "string"
-          ? mergeBlockquoteSections(extractedSections, rawHtml, extractionTrace?.strategy ?? "")
-          : { sections: extractedSections, method: extractionTrace?.strategy ?? "" };
+          ? mergeBlockquoteSections(base, rawHtml, extractionTrace?.strategy ?? "")
+          : { sections: base, method: extractionTrace?.strategy ?? "" };
 
-      fs.writeFileSync(
-        path.join(artifactDir, "extracted_sections.json"),
-        JSON.stringify({ sections: mergedResult.sections, trace: extractionTrace ?? null }, null, 2),
-        "utf8"
-      );
-      log("extract", `DOM sections saved: ${mergedResult.sections.length}件`, { method: mergedResult.method });
+      if (mergedResult.sections.length > 0) {
+        fs.writeFileSync(
+          path.join(artifactDir, "extracted_sections.json"),
+          JSON.stringify({ sections: mergedResult.sections, trace: extractionTrace ?? null }, null, 2),
+          "utf8"
+        );
+        log("extract", `DOM sections saved: ${mergedResult.sections.length}件`, { method: mergedResult.method });
+      }
     }
 
     // extract_report.json
