@@ -1,78 +1,114 @@
-# Museum Jobtool MVP
+# jobtool（Sales_JobADCatcher_202603）
 
-ATS求人ページ（主にHRMOS）を開いた状態でChrome拡張から求人票を生成し、Word（.docx）とスカウト文を返すMVPです。
+株式会社Museum｜求人票・スカウト文生成ツール
 
-## 構成
+---
+
+## このプロジェクトの目的
+
+採用サイト（主にHRMOS）の求人ページをChrome拡張から読み込み、
+求人票（Word/.docx）とスカウト文を自動生成する。
+
+将来的にはURLを貼るだけで求人票＋スカウト文が一発生成できるSaaSとして
+零細人材紹介業者向けに提供することを視野に入れている。
+
+---
+
+## ステータス
+
+**完成（運用中）**
+
+- Chrome拡張（MV3）：求人ページからテキスト抽出 ✅
+- Expressサーバー：Claude APIで求人票JSON生成・スカウト文生成 ✅
+- Word出力：docxtemplaterで.docx生成 ✅
+- Claude APIへの移行完了（旧OpenAI API→Claude API） ✅
+
+---
+
+## 担当AI
+
+**Claude + Claude Code**（開発完了）
+**ChatGPT + Codex**（museum-jobtool-codexリポジトリ経由で参照）
+改修が必要な場合はAGENTS.mdのルールに従って担当AIを割り当てる。
+
+---
+
+## リポジトリ構成
+
+| リポジトリ | 用途 |
+|---|---|
+| takeshifukui-museum/jobtool | メイン開発リポジトリ（Claude担当） |
+| takeshifukui-museum/museum-jobtool-codex | ChatGPT+Codex参照用（jobtool/mainのミラー） |
+
+---
+
+## 環境
+
+- OS：Windows
+- Node.js：v24.13.0
+- ローカルパス：C:\dev\jobtool\
+- GitHubリポジトリ：takeshifukui-museum/jobtool
+- APIキー：Anthropic Claude API（ANTHROPIC_API_KEY）
+
+---
+
+## フォルダ構成
+
 ```
-/museum-jobtool
-  /server        Node + Express API
-  /extension     Chrome拡張 (MV3)
-  /templates     Wordテンプレ
+jobtool/
+├── extension/        Chrome拡張（MV3）
+├── server/           Node + Express API
+│   └── src/
+│       ├── index.ts  APIエンドポイント
+│       ├── openai.ts Claude API連携（名前はopenaiだが実際はClaude）
+│       ├── schema.ts 求人票JSONスキーマ
+│       ├── extract.ts テキスト前処理
+│       ├── sanitize.ts 禁止転載フィルタ
+│       └── word.ts   Word文書生成
+├── templates/        Wordテンプレート
+└── assets/           ロゴ等
 ```
 
-## セットアップ（Windows）
+---
 
-### 1) サーバ起動
-1. `museum-jobtool/server` に移動
-2. 依存関係をインストール
-   ```bash
-   npm install
-   ```
-3. `.env.example` を `.env` にコピーして `OPENAI_API_KEY` を設定
-4. 開発サーバ起動
-   ```bash
-   npm run dev
-   ```
+## 起動方法
 
-### 2) テンプレ配置
-- `museum-jobtool/templates/museum_template.docx` を、MuseumのWordテンプレに差し替えてください。
-- テンプレ内には指定の差し込みタグが含まれている必要があります。
+1. `server/起動.bat`をダブルクリック（またはコマンドプロンプトで`npm run dev`）
+2. Chromeで`chrome://extensions/`を開く
+3. 「パッケージ化されていない拡張機能を読み込む」→`extension/`フォルダを選択
+4. HRMOSなどの求人ページを開く
+5. Chrome拡張の「求人票を解析」ボタンを押す
+6. `.docx`がダウンロードされれば成功
 
-### 3) Chrome拡張の読み込み
-1. Chromeで `chrome://extensions` を開く
-2. 右上の「デベロッパーモード」をON
-3. 「パッケージ化されていない拡張機能を読み込む」→ `museum-jobtool/extension` を選択
+---
 
-### 4) 動作テスト
-1. HRMOS求人ページを開く
-2. 拡張の「求人票生成」ボタンを押下
-3. `.docx` がダウンロードされれば成功
+## 出力先
 
-## API
-`POST /api/generate`
+- 求人票：`C:\Museum\JobSheets\`
+- スカウト文：`C:\Museum\ScoutTexts\`
 
-入力:
-```json
-{
-  "url": "https://...",
-  "title": "...",
-  "rawText": "document.body.innerText 相当",
-  "siteHint": "HRMOS",
-  "outputs": ["job_docx", "scout_text"]
-}
+---
+
+## .envの設定内容
+
+```
+ANTHROPIC_API_KEY=AnthropicのAPIキー
 ```
 
-出力:
-```json
-{
-  "docx": "Base64エンコードされたdocx",
-  "scoutText": "スカウト文",
-  "meta": { "warnings": [] }
-}
-```
+---
 
-## エラーコード
-- `TEXT_EXTRACTION_EMPTY`: rawTextが空
-- `SALARY_REQUIRED`: salary.summary が空
-- `TEMPLATE_RENDER_FAIL`: docx生成失敗
-- `LLM_INVALID_JSON`: LLM出力のJSONが壊れている
+## 保持しているブランチ
 
-## ファイル別要点
-- `server/src/index.ts`: APIエンドポイントとエラーハンドリング
-- `server/src/openai.ts`: Responses APIで求人票JSONとスカウト文生成
-- `server/src/schema.ts`: 求人票JSONスキーマ
-- `server/src/sanitize.ts`: 禁止転載フィルタ
-- `server/src/word.ts`: docx差し込み + 空行削除
-- `server/src/extract.ts`: rawText正規化と配列の整形
-- `extension/*`: Chrome拡張UI・抽出・API呼び出し
-- `templates/museum_template.docx`: Wordテンプレ（差し替え前提）
+| ブランチ | 用途 |
+|---|---|
+| main | 最新版・本番 |
+| finish-jobtool-clean | クリーンな初期状態（参照用） |
+| claude/ai-text-editor-split-pane-bdEqm | AIテキストエディタ（別ツール・将来verUP予定） |
+
+---
+
+## 注意事項
+
+- `server/src/openai.ts`というファイル名だが、実際はClaude APIを使用（import文変更コスト回避のため名前を維持）
+- credentials等の機密ファイルはGitHubにプッシュしない
+- museum-jobtool-codexリポジトリはjobtool/mainのミラーであり、直接編集しない
