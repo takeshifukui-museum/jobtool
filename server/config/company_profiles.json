@@ -1,0 +1,91 @@
+{
+  "_resolveHints": [
+    { "contains": "札幌スタジオ", "key": "sega_sapporo_studio" },
+    { "contains": "フェイブ", "key": "sega_fave" },
+    { "contains": "セガ", "key": "sega" }
+  ],
+  "sega": {
+    "displayCompanyName": "株式会社セガ",
+    "defaults": {
+      "work.hours": "フレックスタイム制\nコアタイム：10時30分～15時30分\nフレキシブルタイム：8時00分〜22時00分",
+      "work.holidays": "完全週休2日制（土・日）、祝日、年次有給休暇、夏季休日5日、冬季休日3日、特別休日1日、特別休暇2日（年間休日数130日）",
+      "benefits.items": [
+        "確定拠出型年金制度（選択制DC）",
+        "財形貯蓄制度",
+        "ライフプラン手当（退職金前払選択制度）",
+        "慶弔金・社員貸付金",
+        "福利厚生倶楽部（リロクラブ）",
+        "カラフルポイント制度",
+        "セガサミー保養所（伊豆高原・軽井沢）",
+        "副業制度Job+",
+        "転居費用補助",
+        "ファミリーサポートプラス（卵子凍結援助・産後ケア・企業内保育園・時短サポート・出産子育て支援金・育休復職支援金）",
+        "健康診断・人間ドック補助・インフルエンザ予防接種費用助成・がん等検診補助",
+        "クラブ活動・社内コミュニケーション促進活動補助"
+      ],
+      "insurance.socialInsurance": "健康保険、介護保険、厚生年金保険、労災保険、雇用保険、団体生命保険"
+    },
+    "sources": {
+      "work.hours": ["https://www.sega.co.jp/recruit/fresh/details/"],
+      "work.holidays": ["https://www.sega.co.jp/recruit/fresh/details/"],
+      "benefits.items": ["https://www.sega.co.jp/recruit/fresh/details/"],
+      "insurance.socialInsurance": ["https://www.sega.co.jp/recruit/fresh/details/"]
+    }
+  },
+  "sega_sapporo_studio": {
+    "displayCompanyName": "株式会社セガ 札幌スタジオ",
+    "defaults": {
+      "work.hours": "フレックスタイム制\nコアタイム：10時30分～15時30分\nフレキシブルタイム：8時00分〜22時00分",
+      "work.holidays": "完全週休2日制（土・日）、祝日、年次有給休暇、夏季休日5日、冬季休日3日、特別休日1日、特別休暇2日（年間休日数130日）",
+      "benefits.items": [
+        "確定拠出型年金制度（選択制DC）",
+        "財形貯蓄制度",
+        "ライフプラン手当（退職金前払選択制度）",
+        "慶弔金・社員貸付金",
+        "福利厚生倶楽部（リロクラブ）",
+        "カラフルポイント制度",
+        "セガサミー保養所（伊豆高原・軽井沢）",
+        "副業制度Job+",
+        "転居費用補助",
+        "ファミリーサポートプラス（卵子凍結援助・産後ケア・企業内保育園・時短サポート・出産子育て支援金・育休復職支援金）",
+        "健康診断・人間ドック補助・インフルエンザ予防接種費用助成・がん等検診補助",
+        "クラブ活動・社内コミュニケーション促進活動補助"
+      ],
+      "insurance.socialInsurance": "健康保険、介護保険、厚生年金保険、労災保険、雇用保険、団体生命保険"
+    },
+    "sources": {
+      "work.hours": ["https://www.sega.co.jp/recruit/fresh/details/sapporostudio/"],
+      "work.holidays": ["https://www.sega.co.jp/recruit/fresh/details/sapporostudio/"],
+      "benefits.items": ["https://www.sega.co.jp/recruit/fresh/details/sapporostudio/"],
+      "insurance.socialInsurance": ["https://www.sega.co.jp/recruit/fresh/details/sapporostudio/"]
+    }
+  },
+  "sega_fave": {
+    "displayCompanyName": "株式会社セガフェイブ",
+    "defaults": {
+      "work.hours": "フレックスタイム制\nコアタイム：10時30分～15時30分\nフレキシブルタイム：8時00分〜22時00分",
+      "work.holidays": "完全週休2日制（土・日）、祝日、年次有給休暇、夏季休日5日、冬季休日3日、特別休日1日、特別休暇2日（年間休日数130日）",
+      "benefits.items": [
+        "確定拠出型年金制度（選択制DC）",
+        "財形貯蓄制度",
+        "ライフプラン手当（退職金前払選択制度）",
+        "慶弔金・社員貸付金",
+        "福利厚生倶楽部（リロクラブ）",
+        "カラフルポイント制度",
+        "セガサミー保養所（伊豆高原・軽井沢）",
+        "副業制度Job+",
+        "転居費用補助",
+        "ファミリーサポートプラス（卵子凍結援助・産後ケア・企業内保育園・時短サポート・出産子育て支援金・育休復職支援金）",
+        "健康診断・人間ドック補助・インフルエンザ予防接種費用助成・がん等検診補助",
+        "クラブ活動・社内コミュニケーション促進活動補助"
+      ],
+      "insurance.socialInsurance": "健康保険、介護保険、厚生年金保険、労災保険、雇用保険、団体生命保険"
+    },
+    "sources": {
+      "work.hours": ["https://www.segafave.co.jp/recruit/details/"],
+      "work.holidays": ["https://www.segafave.co.jp/recruit/details/"],
+      "benefits.items": ["https://www.segafave.co.jp/recruit/details/"],
+      "insurance.socialInsurance": ["https://www.segafave.co.jp/recruit/details/"]
+    }
+  }
+}
