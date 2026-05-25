@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { JobPosting } from "./schema.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ---------------------------------------------------------------------------
 // A) 企業名の正規化（外部辞書なし → 原文トリムのみ）
@@ -24,7 +28,7 @@ export const normalizeCompanyName = (name: string): string => {
 //    部分一致（contains）ルールを試行する。
 // ---------------------------------------------------------------------------
 
-const ALIAS_PATH = path.resolve(process.cwd(), "data", "company_alias.json");
+const ALIAS_PATH = path.resolve(__dirname, "..", "..", "data", "company_alias.json");
 
 type AliasMap = Record<string, string>; // alias → company_key
 
@@ -44,8 +48,9 @@ const loadAliasMap = (): AliasMap => {
         }
       }
     }
-  } catch {
-    // ファイルが無い場合は空マップ（エラーにしない）
+  } catch (e) {
+    console.warn("[company] company_alias.json 読み込み失敗（パス:", ALIAS_PATH, "）", e instanceof Error ? e.message : e);
+    return map;
   }
   aliasCache = map;
   return map;
@@ -74,7 +79,7 @@ export const clearAliasCache = (): void => {
 //    ※ company_profiles.json (D) が優先。static は下位互換として残す。
 // ---------------------------------------------------------------------------
 
-const COMPANY_STATIC_DIR = path.resolve(process.cwd(), "data", "company_static");
+const COMPANY_STATIC_DIR = path.resolve(__dirname, "..", "..", "data", "company_static");
 
 /**
  * company_static で注入を許可するフィールド一覧（ホワイトリスト方式）。
@@ -222,7 +227,7 @@ export const mergeCompanyStatic = (
 //   逆引きマップを構築する。
 // ---------------------------------------------------------------------------
 
-const FIELD_ALIASES_PATH = path.resolve(process.cwd(), "config", "field_aliases.json");
+const FIELD_ALIASES_PATH = path.resolve(__dirname, "..", "..", "config", "field_aliases.json");
 
 type FieldAliasMap = Record<string, string>; // label → canonical field path
 
@@ -279,7 +284,7 @@ export const resolveFieldAlias = (label: string): string | null => {
 //    根拠（source.url）を job.meta.injected に記録する。
 // ---------------------------------------------------------------------------
 
-const OVERRIDES_PATH = path.resolve(process.cwd(), "config", "company_overrides.json");
+const OVERRIDES_PATH = path.resolve(__dirname, "..", "..", "config", "company_overrides.json");
 
 type ResolveHint = { contains: string; key: string };
 
@@ -314,8 +319,9 @@ const loadOverridesConfig = (): OverridesConfig => {
   try {
     const raw = fs.readFileSync(OVERRIDES_PATH, "utf8");
     overridesCache = JSON.parse(raw) as OverridesConfig;
-  } catch {
-    overridesCache = {} as OverridesConfig;
+  } catch (e) {
+    console.warn("[company] company_overrides.json 読み込み失敗（パス:", OVERRIDES_PATH, "）", e instanceof Error ? e.message : e);
+    return {} as OverridesConfig;
   }
   return overridesCache;
 };
@@ -438,7 +444,6 @@ export const applyCompanyDefaults = (
 
   // 1) work.hours
   if (canApply("work.hours") && typeof d["work.hours"] === "string" && d["work.hours"].trim()) {
-console.log("[debug] work.hours value:", JSON.stringify(job.work.hours), "isNonEmpty:", isNonEmpty(job.work.hours ?? ""));
     if (!isNonEmpty(job.work.hours)) {
       job.work.hours = d["work.hours"];
       appliedFields.push("work.hours");
