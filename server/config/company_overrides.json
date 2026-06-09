@@ -1,11 +1,11 @@
-﻿{
+{
   "_config": {
-    "default_allowed_fields": ["work.hours", "work.holidays", "benefits.items", "insurance.socialInsurance"],
+    "default_allowed_fields": ["work.hours", "work.holidays", "work.break", "work.probation", "benefits.items", "insurance.socialInsurance"],
     "never_allow_fields_prefix": [
       "salary", "compensation", "pay",
       "job.description", "job.responsibilities",
       "requirements",
-      "position.employmentType", "position.contractTerm", "position.probation"
+      "position.employmentType", "position.contractTerm"
     ]
   },
   "_resolveHints": [
@@ -17,6 +17,7 @@
   ],
   "sega": {
     "enabled": true,
+    "force_fields": ["benefits.items"],
     "displayCompanyName": "株式会社セガ",
     "source": {
       "url": "https://www.sega.co.jp/recruit/fresh/details/",
@@ -26,6 +27,8 @@
     "fields": {
       "work.hours": "フレックスタイム制\nコアタイム：10時00分〜15時00分\nフレキシブルタイム：7時00分〜12時00分",
       "work.holidays": "完全週休2日制（土・日）/祝日、年次有給休暇、夏季休暇5日、年末年始休日3日、慶弔休暇1日、慶弔休暇2日（年間所定休日数130日）",
+      "work.break": "60分",
+      "work.probation": "あり（詳細は面談にて確認）",
       "benefits.items": [
         "確定拠出型年金制度（マッチング拠出DC）",
         "財形貯蓄制度",
@@ -45,6 +48,7 @@
   },
   "sega_sapporo_studio": {
     "enabled": true,
+    "force_fields": ["benefits.items"],
     "displayCompanyName": "株式会社セガ 札幌スタジオ",
     "source": {
       "url": "https://www.sega.co.jp/recruit/fresh/details/sapporostudio/",
@@ -54,6 +58,8 @@
     "fields": {
       "work.hours": "フレックスタイム制\nコアタイム：10時00分〜15時00分\nフレキシブルタイム：7時00分〜12時00分",
       "work.holidays": "完全週休2日制（土・日）/祝日、年次有給休暇、夏季休暇5日、年末年始休日3日、慶弔休暇1日、慶弔休暇2日（年間所定休日数130日）",
+      "work.break": "60分",
+      "work.probation": "あり（詳細は面談にて確認）",
       "benefits.items": [
         "確定拠出型年金制度（マッチング拠出DC）",
         "財形貯蓄制度",
@@ -73,6 +79,7 @@
   },
   "sega_fave": {
     "enabled": true,
+    "force_fields": ["benefits.items"],
     "displayCompanyName": "株式会社セガフェイブ",
     "source": {
       "url": "https://www.segafave.co.jp/recruit/details/",
@@ -82,6 +89,8 @@
     "fields": {
       "work.hours": "フレックスタイム制\nコアタイム：10時00分〜15時00分\nフレキシブルタイム：7時00分〜12時00分",
       "work.holidays": "完全週休2日制（土・日）/祝日、年次有給休暇、夏季休暇5日、年末年始休日3日、慶弔休暇1日、慶弔休暇2日（年間所定休日数130日）",
+      "work.break": "60分",
+      "work.probation": "あり（詳細は面談にて確認）",
       "benefits.items": [
         "確定拠出型年金制度（マッチング拠出DC）",
         "財形貯蓄制度",
