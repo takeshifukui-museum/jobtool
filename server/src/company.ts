@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { JobPosting } from "./schema.js";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-import { JobPosting } from "./schema.js";
 
 // ---------------------------------------------------------------------------
 // A) 企業名の正規化
@@ -38,7 +39,8 @@ const loadAliasMap = (): AliasMap => {
       }
     }
   } catch (e) {
-    console.warn("[company] company_alias.json 読み込み失敗:", ALIAS_PATH, e);
+    console.warn("[company] company_alias.json 読み込み失敗（パス:", ALIAS_PATH, "）", e instanceof Error ? e.message : e);
+    return map;
   }
   aliasCache = map;
   return map;
@@ -174,7 +176,7 @@ export const mergeCompanyStatic = (
 
 const FIELD_ALIASES_PATH = path.resolve(__dirname, "..", "config", "field_aliases.json");
 
-type FieldAliasMap = Record<string, string>;
+type FieldAliasMap = Record<string, string>; // label → canonical field path
 let fieldAliasCache: FieldAliasMap | null = null;
 
 export const loadFieldAliases = (): FieldAliasMap => {
@@ -245,7 +247,8 @@ const loadOverridesConfig = (): OverridesConfig => {
     overridesCache = JSON.parse(raw) as OverridesConfig;
     console.log("[company] company_overrides.json 読み込み成功, keys:", Object.keys(overridesCache).filter(k => !k.startsWith("_")));
   } catch (e) {
-    console.warn("[company] company_overrides.json 読み込み失敗:", OVERRIDES_PATH, e);
+    console.warn("[company] company_overrides.json 読み込み失敗（パス:", OVERRIDES_PATH, "）", e instanceof Error ? e.message : e);
+    return {} as OverridesConfig;
   }
   return overridesCache ?? ({} as OverridesConfig);
 };

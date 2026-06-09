@@ -572,73 +572,75 @@ interface SaveResult {
 
 const saveToOutputDirs = (
   artifactDir: string,
-  suggestedFilename: string,
+  companyName: string,
+  positionTitle: string,
   scoutText: string | null,
 ): SaveResult => {
   const cfg = loadStorageConfig();
   const savedFiles: string[] = [];
   const errors: string[] = [];
 
-  // --- Word (docx) ---
-  if (cfg.jobDocxDir) {
+  if (!cfg.jobDocxDir) return { savedFiles, errors };
+
+  const company = sanitizePathSegment(companyName || "不明", 30);
+  const position = sanitizePathSegment(positionTitle || "不明", 50);
+  const yyyymm = new Date().toISOString().slice(0, 7).replace("-", "");
+  const subDir = `${company}_${position}_${yyyymm}`;
+  const outputDir = path.join(cfg.jobDocxDir, subDir);
+
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+  } catch (e) {
+    errors.push(`フォルダ作成失敗: ${e instanceof Error ? e.message : String(e)}`);
+    return { savedFiles, errors };
+  }
+
+  log("save", `出力フォルダ: ${outputDir}`);
+
+  // --- Word (docx) → 求人票.docx ---
+  const srcDocx = path.join(artifactDir, "output.docx");
+  if (fs.existsSync(srcDocx)) {
     try {
-      fs.mkdirSync(cfg.jobDocxDir, { recursive: true });
-      const srcDocx = path.join(artifactDir, "output.docx");
-      if (fs.existsSync(srcDocx)) {
-        const dest = path.join(cfg.jobDocxDir, suggestedFilename);
-        fs.copyFileSync(srcDocx, dest);
-        savedFiles.push(dest);
-        log("save", `Word保存: ${dest}`);
-      }
+      const dest = path.join(outputDir, "求人票.docx");
+      fs.copyFileSync(srcDocx, dest);
+      savedFiles.push(dest);
+      log("save", `Word保存: ${dest}`);
     } catch (e) {
-      const msg = `Word保存失敗: ${e instanceof Error ? e.message : String(e)}`;
-      log("save", msg);
-      errors.push(msg);
+      errors.push(`Word保存失敗: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  // --- スカウト文 (txt) — scoutTextDir へ ---
-  if (cfg.scoutTextDir && scoutText) {
+  // --- スカウト文 → スカウト文.txt (UTF-8 without BOM) ---
+  if (scoutText) {
     try {
-      fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
-      const scoutFilename = suggestedFilename
-        .replace(/\.docx$/i, "")
-        .replace(/^求人票_/, "スカウト文_") + ".txt";
-      const dest = path.join(cfg.scoutTextDir, scoutFilename);
+      const dest = path.join(outputDir, "スカウト文.txt");
       fs.writeFileSync(dest, scoutText, "utf8");
       savedFiles.push(dest);
       log("save", `スカウト文保存: ${dest}`);
     } catch (e) {
-      const msg = `スカウト文保存失敗: ${e instanceof Error ? e.message : String(e)}`;
-      log("save", msg);
-      errors.push(msg);
+      errors.push(`スカウト文保存失敗: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  // --- テキスト系 (json, md) — scoutTextDir へ ---
-  if (cfg.scoutTextDir) {
-    try {
-      fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
-      const baseName = suggestedFilename.replace(/\.docx$/i, "");
-      const textFiles: Array<{ src: string; destName: string }> = [
-        { src: "job.json", destName: `${baseName}.json` },
-        { src: "job_structured.md", destName: `${baseName}_structured.md` },
-        { src: "job_raw.md", destName: `${baseName}_raw.md` },
-      ];
-      for (const { src, destName } of textFiles) {
-        const srcPath = path.join(artifactDir, src);
-        if (fs.existsSync(srcPath)) {
-          const destPath = path.join(cfg.scoutTextDir, destName);
-          fs.copyFileSync(srcPath, destPath);
-          savedFiles.push(destPath);
-          log("save", `テキスト保存: ${destPath}`);
-        }
+  // --- テキスト系 (json, md) → 同フォルダ ---
+  try {
+    const baseName = `${company}_${position}`;
+    const textFiles: Array<{ src: string; destName: string }> = [
+      { src: "job.json", destName: `${baseName}.json` },
+      { src: "job_structured.md", destName: `${baseName}_structured.md` },
+      { src: "job_raw.md", destName: `${baseName}_raw.md` },
+    ];
+    for (const { src, destName } of textFiles) {
+      const srcPath = path.join(artifactDir, src);
+      if (fs.existsSync(srcPath)) {
+        const destPath = path.join(outputDir, destName);
+        fs.copyFileSync(srcPath, destPath);
+        savedFiles.push(destPath);
+        log("save", `テキスト保存: ${destPath}`);
       }
-    } catch (e) {
-      const msg = `テキスト保存失敗: ${e instanceof Error ? e.message : String(e)}`;
-      log("save", msg);
-      errors.push(msg);
     }
+  } catch (e) {
+    errors.push(`テキスト保存失敗: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   return { savedFiles, errors };
@@ -1446,10 +1448,11 @@ app.post("/api/render", async (req, res) => {
       fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
     } catch { /* ignore */ }
 
-    const suggestedFilename = buildSuggestedFilename(sanitized.position.title, sanitized.position.title, sanitized.company.displayName ?? sanitized.company.name);
+    const displayCompany = sanitized.company.displayName ?? sanitized.company.name;
+    const suggestedFilename = buildSuggestedFilename(sanitized.position.title, sanitized.position.title, displayCompany);
 
     // storage.json の保存先へ書き出し
-    const saveResult = saveToOutputDirs(artifactDir, suggestedFilename, scoutText);
+    const saveResult = saveToOutputDirs(artifactDir, displayCompany, sanitized.position.title, scoutText);
 
     return res.json({
       suggestedFilename,
