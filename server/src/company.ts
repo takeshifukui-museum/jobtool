@@ -28,7 +28,7 @@ export const normalizeCompanyName = (name: string): string => {
 //    部分一致（contains）ルールを試行する。
 // ---------------------------------------------------------------------------
 
-const ALIAS_PATH = path.resolve(__dirname, "..", "..", "data", "company_alias.json");
+const ALIAS_PATH = path.resolve(__dirname, "..", "data", "company_alias.json");
 
 type AliasMap = Record<string, string>; // alias → company_key
 
@@ -79,7 +79,7 @@ export const clearAliasCache = (): void => {
 //    ※ company_profiles.json (D) が優先。static は下位互換として残す。
 // ---------------------------------------------------------------------------
 
-const COMPANY_STATIC_DIR = path.resolve(__dirname, "..", "..", "data", "company_static");
+const COMPANY_STATIC_DIR = path.resolve(__dirname, "..", "data", "company_static");
 
 /**
  * company_static で注入を許可するフィールド一覧（ホワイトリスト方式）。
@@ -227,7 +227,7 @@ export const mergeCompanyStatic = (
 //   逆引きマップを構築する。
 // ---------------------------------------------------------------------------
 
-const FIELD_ALIASES_PATH = path.resolve(__dirname, "..", "..", "config", "field_aliases.json");
+const FIELD_ALIASES_PATH = path.resolve(__dirname, "..", "config", "field_aliases.json");
 
 type FieldAliasMap = Record<string, string>; // label → canonical field path
 
@@ -284,7 +284,7 @@ export const resolveFieldAlias = (label: string): string | null => {
 //    根拠（source.url）を job.meta.injected に記録する。
 // ---------------------------------------------------------------------------
 
-const OVERRIDES_PATH = path.resolve(__dirname, "..", "..", "config", "company_overrides.json");
+const OVERRIDES_PATH = path.resolve(__dirname, "..", "config", "company_overrides.json");
 
 type ResolveHint = { contains: string; key: string };
 

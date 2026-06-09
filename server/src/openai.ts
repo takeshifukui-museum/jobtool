@@ -107,7 +107,7 @@ export const generateJobPosting = async (input: GenerateInput): Promise<JobPosti
   }
 };
 
-const SCOUT_TEMPLATE_PATH = path.resolve(__dirname, "..", "..", "config", "scout_template.md");
+const SCOUT_TEMPLATE_PATH = path.resolve(__dirname, "..", "config", "scout_template.md");
 
 const loadScoutTemplate = (): { system: string; user: string } => {
   const raw = fs.readFileSync(SCOUT_TEMPLATE_PATH, "utf8");
