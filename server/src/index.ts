@@ -208,7 +208,13 @@ const normalizePositionTitle = (job: JobPosting): void => {
   // ◆急募◆ 等の装飾マーカーを除去
   title = title.replace(/◆[^◆]*◆/g, "").trim();
 
-  // 前後を囲む【】を除去（中身は保持）
+  // _求人No.XXXXX を除去（HRMOS等）
+  title = title.replace(/_求人No\.\d+$/, "").trim();
+
+  // 先頭の【xxx】を繰り返し除去（後ろに非括弧テキストが続く場合のみ）
+  title = title.replace(/^(【[^】]*】\s*)+(?=\S)/, "").trim();
+
+  // 前後を囲む【】を除去（中身は保持）— 上記で処理されなかった単一ラップの場合
   const bracketMatch = /^【(.+)】$/.exec(title);
   if (bracketMatch) {
     title = bracketMatch[1].trim();
