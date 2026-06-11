@@ -1,4 +1,5 @@
-const API_URL = "http://localhost:3000/api/generate";
+const API_GENERATE_URL = "http://localhost:3000/api/generate";
+const API_RENDER_URL = "http://localhost:3000/api/render";
 // #region agent log (debug mode)
 const DEBUG_ENDPOINT = "http://127.0.0.1:7243/ingest/17ed477e-d29e-46f0-9713-bddaa4a1a07d";
 const dbg = (payload) => {
@@ -9,40 +10,6 @@ const dbg = (payload) => {
   }).catch(() => {});
 };
 // #endregion
-
-const base64ToDataUrl = (base64, contentType) => {
-  return `data:${contentType};base64,${base64}`;
-};
-
-const sanitizePathPart = (s) => {
-  return String(s || "")
-    .replace(/[\\/:*?"<>|]/g, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[ .]+$/g, "");
-};
-
-// Chrome downloads API の filename は「相対パス」のみ（絶対パス不可、.. 不可）
-const buildDownloadFilename = (folderName, suggestedFilename) => {
-  const fallback = "求人票_求人情報.docx";
-  const safeFile = sanitizePathPart(suggestedFilename || fallback) || fallback;
-  const file = safeFile.toLowerCase().endsWith(".docx") ? safeFile : `${safeFile}.docx`;
-
-  const rawFolder = String(folderName || "")
-    .replace(/\\/g, "/")
-    .replace(/^[a-zA-Z]:/g, "") // drive letter を削除
-    .replace(/^\/+/g, ""); // 先頭スラッシュ削除
-
-  const parts = rawFolder
-    .split("/")
-    .map((p) => p.trim())
-    .filter((p) => p && p !== "." && p !== "..")
-    .map(sanitizePathPart)
-    .filter(Boolean);
-
-  if (parts.length === 0) return file;
-  return `${parts.join("/")}/${file}`;
-};
 
 const extractFromTab = async (tabId) => {
   const sendExtractMessage = () =>
@@ -110,7 +77,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       // #endregion
 
-      const response = await fetch(API_URL, {
+      // Step 1: /api/generate → sessionId を取得
+      const generateResponse = await fetch(API_GENERATE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -118,8 +86,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           outputs: ["job_docx", "scout_text"]
         })
       });
-      if (!response.ok) {
-        const responseText = await response.text();
+      if (!generateResponse.ok) {
+        const responseText = await generateResponse.text();
         let detailMessage = responseText;
         try {
           const errorData = JSON.parse(responseText);
@@ -131,16 +99,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, message: detailMessage });
         return;
       }
-      const data = await response.json();
-      const filename = buildDownloadFilename(message.folderName, data.suggestedFilename);
-      const contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-      const url = base64ToDataUrl(data.docx, contentType);
-      await chrome.downloads.download({
-        url,
-        filename,
-        saveAs: true
+      const generateData = await generateResponse.json();
+      const { sessionId, scoutText } = generateData;
+      if (!sessionId) {
+        sendResponse({ ok: false, message: "sessionIdが取得できませんでした" });
+        return;
+      }
+
+      // Step 2: /api/render → C:/Museum/JobSheets/ に直接保存
+      const renderResponse = await fetch(API_RENDER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId })
       });
-      sendResponse({ ok: true, message: "ダウンロードしました", scoutText: data.scoutText || "" });
+      if (!renderResponse.ok) {
+        const responseText = await renderResponse.text();
+        let detailMessage = responseText;
+        try {
+          const errorData = JSON.parse(responseText);
+          detailMessage =
+            errorData?.error?.detail || errorData?.error?.message || errorData?.error?.code || responseText;
+        } catch (parseError) {
+          detailMessage = responseText || "レンダリングエラー";
+        }
+        sendResponse({ ok: false, message: detailMessage });
+        return;
+      }
+      const renderData = await renderResponse.json();
+      const { suggestedFilename, savedFiles } = renderData;
+
+      // Step 3: 完了通知（ファイルはサーバーが直接ディスクに保存済み）
+      sendResponse({
+        ok: true,
+        message: `完了: ${suggestedFilename || "求人票"} を保存しました`,
+        scoutText: scoutText || ""
+      });
     } catch (error) {
       sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
     }
