@@ -918,7 +918,22 @@ app.post("/api/structure", async (req, res) => {
         error: { code: "RAW_MD_NOT_FOUND", message: "job_raw.md が見つかりません。先に /api/extract を実行してください。" },
       });
     }
-    const normalizedText = fs.readFileSync(rawMdPath, "utf8");
+    let normalizedText = fs.readFileSync(rawMdPath, "utf8");
+
+    // rawText が空の場合、extracted_sections.json からテキストを再構築
+    if (!normalizedText.trim()) {
+      try {
+        const sectionsPath = path.join(artifactDir, "extracted_sections.json");
+        if (fs.existsSync(sectionsPath)) {
+          const secData = JSON.parse(fs.readFileSync(sectionsPath, "utf8"));
+          const fallbackSections: Array<{ label: string; value: string }> = secData.sections ?? [];
+          if (fallbackSections.length > 0) {
+            normalizedText = fallbackSections.map((s) => `${s.label}\n${s.value}`).join("\n\n");
+            log("structure", "job_raw.md が空のため extracted_sections.json からテキストを再構築", { length: normalizedText.length });
+          }
+        }
+      } catch { /* フォールバック失敗時は空のまま続行 */ }
+    }
 
     // meta.json から補足情報を取得
     let metaData: Record<string, unknown> = {};
@@ -1020,6 +1035,18 @@ app.post("/api/structure", async (req, res) => {
 
     // (2.6b) position.title 正規化（◆急募◆・【】除去 + 安全ガード）
     normalizePositionTitle(sanitized);
+
+    // (2.6b2) position.title が空の場合、ページタイトルからフォールバック抽出
+    if (!sanitized.position.title?.trim() && title?.trim()) {
+      let fallbackTitle = title.replace(/\s*\|\s*[^|]+$/, "").trim();
+      if (fallbackTitle) {
+        sanitized.position.title = fallbackTitle;
+        normalizePositionTitle(sanitized);
+        if (sanitized.position.title?.trim()) {
+          log("title-fallback", `ページタイトルからposition.title復元: "${title}" → "${sanitized.position.title}"`);
+        }
+      }
+    }
 
     // (2.6c) 郵便番号の補完（rawText にあり work.location に無い場合）
     recoverPostalCode(sanitized, normalizedText);
@@ -1599,6 +1626,19 @@ app.post("/api/generate", async (req, res) => {
 
     // position.title 正規化（◆急募◆・【】除去 + 安全ガード）
     normalizePositionTitle(sanitized);
+
+    // position.title が空の場合、ページタイトルからフォールバック抽出
+    if (!sanitized.position.title?.trim() && title?.trim()) {
+      const genTitle = String(title);
+      let fallbackTitle = genTitle.replace(/\s*\|\s*[^|]+$/, "").trim();
+      if (fallbackTitle) {
+        sanitized.position.title = fallbackTitle;
+        normalizePositionTitle(sanitized);
+        if (sanitized.position.title?.trim()) {
+          log("title-fallback", `ページタイトルからposition.title復元: "${genTitle}" → "${sanitized.position.title}"`);
+        }
+      }
+    }
 
     // 郵便番号の補完（rawText にあり work.location に無い場合）
     recoverPostalCode(sanitized, normalized);
