@@ -107,12 +107,9 @@ const validateEvidence = (
       evidence: job.position.titleEvidence,
       getValue: () => job.position.title,
       clearValue: () => {
-        // titleEvidence が存在する場合はクリアしない
-        // （全角/半角差異等による evidence 不一致の可能性が高い）
-        if (job.position.titleEvidence?.trim()) {
-          log("evidence", "position.title: evidence mismatch but titleEvidence exists — keeping title");
-          return;
-        }
+        // evidenceがrawTextに見つからない場合は無条件でクリアする
+        // titleEvidenceが存在しても、rawTextに存在しない値は信頼しない
+        log("evidence", "position.title: evidence not found in rawText, clearing title");
         job.position.title = "";
       },
     },
@@ -768,7 +765,7 @@ app.use(express.json({ limit: "4mb" }));
 // ===========================================================================
 app.post("/api/extract", async (req, res) => {
   try {
-    const { rawText, rawHtml, url, title, siteHint, extractMeta, extractedSections, extractionTrace, runId: inputRunId } = req.body ?? {};
+    const { rawText, rawHtml, url, title, siteHint, extractMeta, extractedSections, extractionTrace, runId: inputRunId, jobTitle: extractJobTitle } = req.body ?? {};
 
     if (!rawText || String(rawText).trim() === "") {
       return res.status(400).json({
@@ -861,6 +858,7 @@ app.post("/api/extract", async (req, res) => {
       url: url || undefined,
       title: title || undefined,
       siteHint: siteHint || undefined,
+      jobTitle: typeof extractJobTitle === "string" && extractJobTitle.trim() ? extractJobTitle.trim() : undefined,
       extractedLength,
       extractionStrategy: extractionTrace?.strategy,
       sectionCount: Array.isArray(extractedSections) ? extractedSections.length : 0,
@@ -1012,6 +1010,18 @@ app.post("/api/structure", async (req, res) => {
 
     // (2.6b) position.title 正規化（◆急募◆・【】除去 + 安全ガード）
     normalizePositionTitle(sanitized);
+
+    // HRMOS: position.title を page title (jobTitle > title) で上書き確定
+    // OpenAIの推測に依存せず、HRMOSのページタイトルを正とする
+    if (siteHint === "HRMOS") {
+      const hrmosTitle = (jobTitle?.trim()) ? jobTitle.trim() : (title?.trim() ?? "");
+      if (hrmosTitle) {
+        if (hrmosTitle !== sanitized.position.title) {
+          log("title-override", `HRMOS: position.title 確定 "${sanitized.position.title}" → "${hrmosTitle}"`);
+        }
+        sanitized.position.title = hrmosTitle;
+      }
+    }
 
     // (2.6c) 郵便番号の補完（rawText にあり work.location に無い場合）
     recoverPostalCode(sanitized, normalizedText);
@@ -1590,6 +1600,20 @@ app.post("/api/generate", async (req, res) => {
 
     // position.title 正規化（◆急募◆・【】除去 + 安全ガード）
     normalizePositionTitle(sanitized);
+
+    // HRMOS: position.title を page title (jobTitle > title) で上書き確定
+    // OpenAIの推測に依存せず、HRMOSのページタイトルを正とする
+    if (String(siteHint ?? "") === "HRMOS") {
+      const hrmosTitle = (typeof jobTitle === "string" && jobTitle.trim())
+        ? jobTitle.trim()
+        : (typeof title === "string" ? title.trim() : "");
+      if (hrmosTitle) {
+        if (hrmosTitle !== sanitized.position.title) {
+          log("title-override", `HRMOS: position.title 確定 "${sanitized.position.title}" → "${hrmosTitle}"`);
+        }
+        sanitized.position.title = hrmosTitle;
+      }
+    }
 
     // 郵便番号の補完（rawText にあり work.location に無い場合）
     recoverPostalCode(sanitized, normalized);
