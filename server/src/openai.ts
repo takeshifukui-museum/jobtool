@@ -1,5 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { jobPostingSchema, JobPosting } from "./schema.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -101,17 +107,39 @@ export const generateJobPosting = async (input: GenerateInput): Promise<JobPosti
   }
 };
 
+const SCOUT_TEMPLATE_PATH = path.resolve(__dirname, "..", "config", "scout_template.md");
+
+const loadScoutTemplate = (): { system: string; user: string } => {
+  const raw = fs.readFileSync(SCOUT_TEMPLATE_PATH, "utf8");
+  const sysMarker = "## システムプロンプト（AIへの指示）";
+  const usrMarker = "## ユーザープロンプト（差し込みテンプレ）";
+  const sysIdx = raw.indexOf(sysMarker);
+  const usrIdx = raw.indexOf(usrMarker);
+  const system = sysIdx >= 0 && usrIdx >= 0
+    ? raw.slice(sysIdx + sysMarker.length, usrIdx).trim()
+    : "あなたはMuseumのスカウト文作成者です。";
+  const user = usrIdx >= 0
+    ? raw.slice(usrIdx + usrMarker.length).trim()
+    : "スカウト文を作成してください。";
+  return { system, user };
+};
+
 export const generateScoutText = async (job: JobPosting): Promise<string> => {
+  const template = loadScoutTemplate();
+  const jobSummary = JSON.stringify(job, null, 2);
+  const companyName = (job as any).company?.displayName ?? job.company.name ?? "";
+  const positionTitle = job.position.title ?? "";
+
+  const userPrompt = template.user
+    .replace(/\{\{company_name\}\}/g, companyName)
+    .replace(/\{\{position_title\}\}/g, positionTitle)
+    .replace(/\{\{job_summary\}\}/g, jobSummary);
+
   const response = await client.messages.create({
     model: process.env.MODEL || "claude-sonnet-4-6",
-    max_tokens: 2048,
-    system: "あなたはスカウト文の作成者です。柔らかく寄り添う文体で、断定評価は避けます。求人URLは本文に入れません。署名は必ず指定します。",
-    messages: [
-      {
-        role: "user",
-        content: `次の求人票JSONを元に、スカウト文を作成してください。\n\n${JSON.stringify(job, null, 2)}\n\n署名:\n株式会社Museum\n代表取締役\n福井 毅`
-      }
-    ]
+    max_tokens: 8192,
+    system: template.system,
+    messages: [{ role: "user", content: userPrompt }],
   });
 
   const textBlock = response.content.find((b) => b.type === "text");

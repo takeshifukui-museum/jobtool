@@ -205,7 +205,13 @@ const normalizePositionTitle = (job: JobPosting): void => {
   // ◆急募◆ 等の装飾マーカーを除去
   title = title.replace(/◆[^◆]*◆/g, "").trim();
 
-  // 前後を囲む【】を除去（中身は保持）
+  // _求人No.XXXXX を除去（HRMOS等）
+  title = title.replace(/_求人No\.\d+$/, "").trim();
+
+  // 先頭の【xxx】を繰り返し除去（後ろに非括弧テキストが続く場合のみ）
+  title = title.replace(/^(【[^】]*】\s*)+(?=\S)/, "").trim();
+
+  // 前後を囲む【】を除去（中身は保持）— 上記で処理されなかった単一ラップの場合
   const bracketMatch = /^【(.+)】$/.exec(title);
   if (bracketMatch) {
     title = bracketMatch[1].trim();
@@ -569,73 +575,75 @@ interface SaveResult {
 
 const saveToOutputDirs = (
   artifactDir: string,
-  suggestedFilename: string,
+  companyName: string,
+  positionTitle: string,
   scoutText: string | null,
 ): SaveResult => {
   const cfg = loadStorageConfig();
   const savedFiles: string[] = [];
   const errors: string[] = [];
 
-  // --- Word (docx) ---
-  if (cfg.jobDocxDir) {
+  if (!cfg.jobDocxDir) return { savedFiles, errors };
+
+  const company = sanitizePathSegment(companyName || "不明", 30);
+  const position = sanitizePathSegment(positionTitle || "不明", 50);
+  const yyyymm = new Date().toISOString().slice(0, 7).replace("-", "");
+  const subDir = `${company}_${position}_${yyyymm}`;
+  const outputDir = path.join(cfg.jobDocxDir, subDir);
+
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+  } catch (e) {
+    errors.push(`フォルダ作成失敗: ${e instanceof Error ? e.message : String(e)}`);
+    return { savedFiles, errors };
+  }
+
+  log("save", `出力フォルダ: ${outputDir}`);
+
+  // --- Word (docx) → 求人票.docx ---
+  const srcDocx = path.join(artifactDir, "output.docx");
+  if (fs.existsSync(srcDocx)) {
     try {
-      fs.mkdirSync(cfg.jobDocxDir, { recursive: true });
-      const srcDocx = path.join(artifactDir, "output.docx");
-      if (fs.existsSync(srcDocx)) {
-        const dest = path.join(cfg.jobDocxDir, suggestedFilename);
-        fs.copyFileSync(srcDocx, dest);
-        savedFiles.push(dest);
-        log("save", `Word保存: ${dest}`);
-      }
+      const dest = path.join(outputDir, "求人票.docx");
+      fs.copyFileSync(srcDocx, dest);
+      savedFiles.push(dest);
+      log("save", `Word保存: ${dest}`);
     } catch (e) {
-      const msg = `Word保存失敗: ${e instanceof Error ? e.message : String(e)}`;
-      log("save", msg);
-      errors.push(msg);
+      errors.push(`Word保存失敗: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  // --- スカウト文 (txt) — scoutTextDir へ ---
-  if (cfg.scoutTextDir && scoutText) {
+  // --- スカウト文 → スカウト文.txt (UTF-8 without BOM) ---
+  if (scoutText) {
     try {
-      fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
-      const scoutFilename = suggestedFilename
-        .replace(/\.docx$/i, "")
-        .replace(/^求人票_/, "スカウト文_") + ".txt";
-      const dest = path.join(cfg.scoutTextDir, scoutFilename);
+      const dest = path.join(outputDir, "スカウト文.txt");
       fs.writeFileSync(dest, scoutText, "utf8");
       savedFiles.push(dest);
       log("save", `スカウト文保存: ${dest}`);
     } catch (e) {
-      const msg = `スカウト文保存失敗: ${e instanceof Error ? e.message : String(e)}`;
-      log("save", msg);
-      errors.push(msg);
+      errors.push(`スカウト文保存失敗: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  // --- テキスト系 (json, md) — scoutTextDir へ ---
-  if (cfg.scoutTextDir) {
-    try {
-      fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
-      const baseName = suggestedFilename.replace(/\.docx$/i, "");
-      const textFiles: Array<{ src: string; destName: string }> = [
-        { src: "job.json", destName: `${baseName}.json` },
-        { src: "job_structured.md", destName: `${baseName}_structured.md` },
-        { src: "job_raw.md", destName: `${baseName}_raw.md` },
-      ];
-      for (const { src, destName } of textFiles) {
-        const srcPath = path.join(artifactDir, src);
-        if (fs.existsSync(srcPath)) {
-          const destPath = path.join(cfg.scoutTextDir, destName);
-          fs.copyFileSync(srcPath, destPath);
-          savedFiles.push(destPath);
-          log("save", `テキスト保存: ${destPath}`);
-        }
+  // --- テキスト系 (json, md) → 同フォルダ ---
+  try {
+    const baseName = `${company}_${position}`;
+    const textFiles: Array<{ src: string; destName: string }> = [
+      { src: "job.json", destName: `${baseName}.json` },
+      { src: "job_structured.md", destName: `${baseName}_structured.md` },
+      { src: "job_raw.md", destName: `${baseName}_raw.md` },
+    ];
+    for (const { src, destName } of textFiles) {
+      const srcPath = path.join(artifactDir, src);
+      if (fs.existsSync(srcPath)) {
+        const destPath = path.join(outputDir, destName);
+        fs.copyFileSync(srcPath, destPath);
+        savedFiles.push(destPath);
+        log("save", `テキスト保存: ${destPath}`);
       }
-    } catch (e) {
-      const msg = `テキスト保存失敗: ${e instanceof Error ? e.message : String(e)}`;
-      log("save", msg);
-      errors.push(msg);
     }
+  } catch (e) {
+    errors.push(`テキスト保存失敗: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   return { savedFiles, errors };
@@ -908,7 +916,22 @@ app.post("/api/structure", async (req, res) => {
         error: { code: "RAW_MD_NOT_FOUND", message: "job_raw.md が見つかりません。先に /api/extract を実行してください。" },
       });
     }
-    const normalizedText = fs.readFileSync(rawMdPath, "utf8");
+    let normalizedText = fs.readFileSync(rawMdPath, "utf8");
+
+    // rawText が空の場合、extracted_sections.json からテキストを再構築
+    if (!normalizedText.trim()) {
+      try {
+        const sectionsPath = path.join(artifactDir, "extracted_sections.json");
+        if (fs.existsSync(sectionsPath)) {
+          const secData = JSON.parse(fs.readFileSync(sectionsPath, "utf8"));
+          const fallbackSections: Array<{ label: string; value: string }> = secData.sections ?? [];
+          if (fallbackSections.length > 0) {
+            normalizedText = fallbackSections.map((s) => `${s.label}\n${s.value}`).join("\n\n");
+            log("structure", "job_raw.md が空のため extracted_sections.json からテキストを再構築", { length: normalizedText.length });
+          }
+        }
+      } catch { /* フォールバック失敗時は空のまま続行 */ }
+    }
 
     // meta.json から補足情報を取得
     let metaData: Record<string, unknown> = {};
@@ -1020,6 +1043,18 @@ app.post("/api/structure", async (req, res) => {
           log("title-override", `HRMOS: position.title 確定 "${sanitized.position.title}" → "${hrmosTitle}"`);
         }
         sanitized.position.title = hrmosTitle;
+      }
+    }
+
+    // (2.6b2) position.title が空の場合、ページタイトルからフォールバック抽出
+    if (!sanitized.position.title?.trim() && title?.trim()) {
+      let fallbackTitle = title.replace(/\s*\|\s*[^|]+$/, "").trim();
+      if (fallbackTitle) {
+        sanitized.position.title = fallbackTitle;
+        normalizePositionTitle(sanitized);
+        if (sanitized.position.title?.trim()) {
+          log("title-fallback", `ページタイトルからposition.title復元: "${title}" → "${sanitized.position.title}"`);
+        }
       }
     }
 
@@ -1456,10 +1491,11 @@ app.post("/api/render", async (req, res) => {
       fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
     } catch { /* ignore */ }
 
-    const suggestedFilename = buildSuggestedFilename(sanitized.position.title, sanitized.position.title, sanitized.company.displayName ?? sanitized.company.name);
+    const displayCompany = sanitized.company.displayName ?? sanitized.company.name;
+    const suggestedFilename = buildSuggestedFilename(sanitized.position.title, sanitized.position.title, displayCompany);
 
     // storage.json の保存先へ書き出し
-    const saveResult = saveToOutputDirs(artifactDir, suggestedFilename, scoutText);
+    const saveResult = saveToOutputDirs(artifactDir, displayCompany, sanitized.position.title, scoutText);
 
     return res.json({
       suggestedFilename,
@@ -1612,6 +1648,19 @@ app.post("/api/generate", async (req, res) => {
           log("title-override", `HRMOS: position.title 確定 "${sanitized.position.title}" → "${hrmosTitle}"`);
         }
         sanitized.position.title = hrmosTitle;
+      }
+    }
+
+    // position.title が空の場合、ページタイトルからフォールバック抽出
+    if (!sanitized.position.title?.trim() && title?.trim()) {
+      const genTitle = String(title);
+      let fallbackTitle = genTitle.replace(/\s*\|\s*[^|]+$/, "").trim();
+      if (fallbackTitle) {
+        sanitized.position.title = fallbackTitle;
+        normalizePositionTitle(sanitized);
+        if (sanitized.position.title?.trim()) {
+          log("title-fallback", `ページタイトルからposition.title復元: "${genTitle}" → "${sanitized.position.title}"`);
+        }
       }
     }
 
