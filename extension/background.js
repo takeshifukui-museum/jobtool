@@ -1,47 +1,29 @@
-const API_URL = "http://localhost:3000/api/generate";
-// #region agent log (debug mode)
-const DEBUG_ENDPOINT = "http://127.0.0.1:7243/ingest/17ed477e-d29e-46f0-9713-bddaa4a1a07d";
-const dbg = (payload) => {
-  fetch(DEBUG_ENDPOINT, {
+// MV3 Service Worker: background.js
+// ファイル保存は server 側で完結。extension は API 呼び出しと結果表示のみ。
+
+const API_BASE = "http://localhost:3000";
+const API_EXTRACT = `${API_BASE}/api/extract`;
+const API_STRUCTURE = `${API_BASE}/api/structure`;
+const API_RENDER = `${API_BASE}/api/render`;
+
+console.log("[background] service worker loaded");
+
+const apiPost = async (url, body) => {
+  const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...payload, timestamp: Date.now() })
-  }).catch(() => {});
-};
-// #endregion
+    body: JSON.stringify(body)
+  });
 
-const base64ToDataUrl = (base64, contentType) => {
-  return `data:${contentType};base64,${base64}`;
-};
+  const text = await response.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch {}
 
-const sanitizePathPart = (s) => {
-  return String(s || "")
-    .replace(/[\\/:*?"<>|]/g, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[ .]+$/g, "");
-};
-
-// Chrome downloads API の filename は「相対パス」のみ（絶対パス不可、.. 不可）
-const buildDownloadFilename = (folderName, suggestedFilename) => {
-  const fallback = "求人票_求人情報.docx";
-  const safeFile = sanitizePathPart(suggestedFilename || fallback) || fallback;
-  const file = safeFile.toLowerCase().endsWith(".docx") ? safeFile : `${safeFile}.docx`;
-
-  const rawFolder = String(folderName || "")
-    .replace(/\\/g, "/")
-    .replace(/^[a-zA-Z]:/g, "") // drive letter を削除
-    .replace(/^\/+/g, ""); // 先頭スラッシュ削除
-
-  const parts = rawFolder
-    .split("/")
-    .map((p) => p.trim())
-    .filter((p) => p && p !== "." && p !== "..")
-    .map(sanitizePathPart)
-    .filter(Boolean);
-
-  if (parts.length === 0) return file;
-  return `${parts.join("/")}/${file}`;
+  if (!response.ok) {
+    const detail = data?.error?.message || data?.error?.detail || data?.error?.code || text || "APIエラー";
+    throw new Error(detail);
+  }
+  return data;
 };
 
 const extractFromTab = async (tabId) => {
@@ -69,7 +51,7 @@ const extractFromTab = async (tabId) => {
         files: ["content.js"]
       });
       await new Promise((r) => setTimeout(r, 200));
-    } catch (injectErr) {
+    } catch {
       throw new Error("このページでは実行できません。求人ページを開き、再読み込み（F5）してからもう一度お試しください。");
     }
     return await sendExtractMessage();
@@ -77,74 +59,80 @@ const extractFromTab = async (tabId) => {
 };
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type !== "GENERATE_JOB_DOCX") {
-    return;
+  // Step 1: extract → structure → プレビュー
+  if (message?.type === "GENERATE_JOB_PREVIEW") {
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      try {
+        const tab = tabs[0];
+        if (!tab || !tab.id) {
+          sendResponse({ ok: false, message: "アクティブタブが見つかりません" });
+          return;
+        }
+
+        const payload = await extractFromTab(tab.id);
+
+        const extractResult = await apiPost(API_EXTRACT, {
+          rawText: payload.rawText,
+          rawHtml: payload.rawHtml,
+          url: payload.url,
+          title: payload.title,
+          siteHint: payload.siteHint,
+          extractMeta: payload.extractMeta,
+          extractedSections: payload.extractedSections,
+          extractionTrace: payload.extractionTrace
+        });
+
+        const structureResult = await apiPost(API_STRUCTURE, { runId: extractResult.runId });
+
+        sendResponse({
+          ok: true,
+          runId: structureResult.runId,
+          sessionId: structureResult.runId,
+          job: structureResult.job,
+          structuredMd: structureResult.structuredMd,
+          suggestedFilename: structureResult.suggestedFilename,
+          meta: structureResult.meta
+        });
+      } catch (error) {
+        sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
+      }
+    });
+    return true;
   }
 
-  chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
-    try {
-      const tab = tabs[0];
-      if (!tab || !tab.id) {
-        sendResponse({ ok: false, message: "アクティブタブが見つかりません" });
-        return;
-      }
-      const payload = await extractFromTab(tab.id);
-
-      // #region agent log (debug mode)
-      dbg({
-        location: "extension/background.js:before_fetch",
-        message: "posting to server /api/generate",
-        data: {
-          urlHost: (() => {
-            try {
-              return new URL(payload?.url || "").host;
-            } catch {
-              return null;
-            }
-          })(),
-          rawTextLen: (payload?.rawText || "").length,
-          hasFolderName: Boolean(message.folderName)
-        },
-        runId: "pre-fix",
-        hypothesisId: "H5"
-      });
-      // #endregion
-
-      const response = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...payload,
-          outputs: ["job_docx", "scout_text"]
-        })
-      });
-      if (!response.ok) {
-        const responseText = await response.text();
-        let detailMessage = responseText;
-        try {
-          const errorData = JSON.parse(responseText);
-          detailMessage =
-            errorData?.error?.detail || errorData?.error?.message || errorData?.error?.code || responseText;
-        } catch (parseError) {
-          detailMessage = responseText || "APIエラー";
+  // Step 2: render → サーバー側で保存完了
+  if (message?.type === "RENDER_JOB_DOCX") {
+    (async () => {
+      try {
+        const runId = message.runId || message.sessionId;
+        if (!runId) {
+          sendResponse({ ok: false, message: "runId がありません" });
+          return;
         }
-        sendResponse({ ok: false, message: detailMessage });
-        return;
-      }
-      const data = await response.json();
-      const filename = buildDownloadFilename(message.folderName, data.suggestedFilename);
-      const contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-      const url = base64ToDataUrl(data.docx, contentType);
-      await chrome.downloads.download({
-        url,
-        filename,
-        saveAs: true
-      });
-      sendResponse({ ok: true, message: "ダウンロードしました", scoutText: data.scoutText || "" });
-    } catch (error) {
-      sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
-    }
-  });
 
-  return true;
+        const data = await apiPost(API_RENDER, { runId, approve: true });
+
+        const savedFiles = data.savedFiles ?? [];
+        const saveErrors = data.saveErrors ?? [];
+
+        console.log("[background] server saved files:", savedFiles);
+        if (saveErrors.length > 0) {
+          console.warn("[background] save errors:", saveErrors);
+        }
+
+        sendResponse({
+          ok: true,
+          message: savedFiles.length > 0 ? "保存しました" : "保存先未設定",
+          savedFiles,
+          saveErrors,
+        });
+      } catch (error) {
+        sendResponse({ ok: false, message: error?.message || "エラーが発生しました" });
+      }
+    })();
+    return true;
+  }
+
+  sendResponse({ ok: false, message: "unknown message type" });
+  return false;
 });

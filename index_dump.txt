@@ -1,0 +1,1839 @@
+﻿import "dotenv/config";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import express from "express";
+import cors from "cors";
+import { generateJobPosting, generateScoutText } from "./openai.js";
+import { sanitizeJobPosting } from "./sanitize.js";
+import { normalizeRawText, hasFixedOvertimeKeywords, mergeBlockquoteSections } from "./extract.js";
+import { renderJobDocx, resolveTemplatePath, getTemplateStat } from "./word.js";
+import { JobPosting } from "./schema.js";
+import {
+  faithfulnessCheck,
+  requiredFieldsCheck,
+  optionalFieldWarnings,
+  toFaithfulnessErrors,
+  type RequiredFieldsResult,
+  type FaithfulnessResult,
+  type FaithfulnessMissing,
+} from "./validate.js";
+import {
+  normalizeCompanyName,
+  resolveCompanyKey,
+  resolveCompanyKeyWithHints,
+  resolveDisplayName,
+  getDisplayCompanyName,
+  mergeCompanyStatic,
+  applyCompanyDefaults,
+  loadFieldAliases,
+  type MergeResult,
+  type DefaultsResult,
+} from "./company.js";
+
+const ENABLE_COMPANY_STATIC = process.env.ENABLE_COMPANY_STATIC === "true" || process.env.ENABLE_COMPANY_STATIC === "1";
+
+/**
+ * STRICT_NO_PARAPHRASE: true 竊・險縺・鋤縺域､懷・縺後≠繧後・蜊ｳ蛛懈ｭ｢・亥宍譬ｼ繝｢繝ｼ繝会ｼ・
+ *                        false (繝・ヵ繧ｩ繝ｫ繝・ 竊・隴ｦ蜻翫・縺ｿ縺ｧ蜃ｦ逅・ｶ夊｡・
+ */
+const STRICT_NO_PARAPHRASE = process.env.STRICT_NO_PARAPHRASE === "true" || process.env.STRICT_NO_PARAPHRASE === "1";
+
+const log = (tag: string, msg: string, data?: Record<string, unknown>) => {
+  console.log(`[${tag}] ${msg}`, data ?? "");
+};
+
+// ---------------------------------------------------------------------------
+// 繝阪せ繝医＆繧後◆繧ｪ繝悶ず繧ｧ繧ｯ繝医・蛟､蜿門ｾ・險ｭ螳・(dot-path: "work.location" 遲・
+// ---------------------------------------------------------------------------
+const getNestedValue = (obj: Record<string, unknown>, dotPath: string): unknown => {
+  const parts = dotPath.split(".");
+  let current: unknown = obj;
+  for (const part of parts) {
+    if (current == null || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+};
+
+const setNestedValue = (obj: Record<string, unknown>, dotPath: string, value: unknown): void => {
+  const parts = dotPath.split(".");
+  let current: Record<string, unknown> = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (current[parts[i]] == null || typeof current[parts[i]] !== "object") {
+      current[parts[i]] = {};
+    }
+    current = current[parts[i]] as Record<string, unknown>;
+  }
+  current[parts[parts.length - 1]] = value;
+};
+
+// ---------------------------------------------------------------------------
+// evidence 讀懆ｨｼ: rawText 蜀・↓ evidence 縺悟性縺ｾ繧後※縺・↑縺代ｌ縺ｰ鬆・岼繧堤┌蜉ｹ蛹・
+// ---------------------------------------------------------------------------
+const normalizeForEvidence = (s: string): string =>
+  s.replace(/[\r\n\t\u3000]/g, " ")
+   .replace(/\s+/g, " ")
+   .replace(/・・g, ":")
+   .replace(/・・g, "(")
+   .replace(/・・g, ")")
+   .trim();
+
+type EvidenceSpec = {
+  fieldLabel: string;
+  evidence: string | undefined;
+  getValue: () => string;
+  clearValue: () => void;
+};
+
+const validateEvidence = (
+  job: JobPosting,
+  normalizedText: string,
+  skipFields?: Set<string>,
+  sections?: Array<{ label: string; value: string }>
+): { warnings: string[] } => {
+  const warnings: string[] = [];
+  const rawNorm = normalizeForEvidence(normalizedText);
+
+  const specs: EvidenceSpec[] = [
+    {
+      fieldLabel: "company.name",
+      evidence: job.company.nameEvidence,
+      getValue: () => job.company.name,
+      clearValue: () => { job.company.name = ""; },
+    },
+    {
+      fieldLabel: "position.title",
+      evidence: job.position.titleEvidence,
+      getValue: () => job.position.title,
+      clearValue: () => {
+        // titleEvidence 縺悟ｭ伜惠縺吶ｋ蝣ｴ蜷医・繧ｯ繝ｪ繧｢縺励↑縺・
+        // ・亥・隗・蜊願ｧ貞ｷｮ逡ｰ遲峨↓繧医ｋ evidence 荳堺ｸ閾ｴ縺ｮ蜿ｯ閭ｽ諤ｧ縺碁ｫ倥＞・・
+        if (job.position.titleEvidence?.trim()) {
+          log("evidence", "position.title: evidence mismatch but titleEvidence exists 窶・keeping title");
+          return;
+        }
+        job.position.title = "";
+      },
+    },
+    {
+      fieldLabel: "position.employmentType",
+      evidence: job.position.employmentTypeEvidence,
+      getValue: () => job.position.employmentType ?? "",
+      clearValue: () => { job.position.employmentType = ""; },
+    },
+    {
+      fieldLabel: "position.contractTerm",
+      evidence: job.position.contractTermEvidence,
+      getValue: () => job.position.contractTerm ?? "",
+      clearValue: () => { job.position.contractTerm = ""; },
+    },
+    {
+      fieldLabel: "work.location",
+      evidence: job.work.locationEvidence,
+      getValue: () => job.work.location ?? "",
+      clearValue: () => { job.work.location = ""; },
+    },
+    {
+      fieldLabel: "salary.summary",
+      evidence: job.salary.summaryEvidence,
+      getValue: () => job.salary.summary,
+      clearValue: () => { job.salary.summary = ""; },
+    },
+  ];
+
+  for (const spec of specs) {
+    if (skipFields?.has(spec.fieldLabel)) continue; // DOM sections 蜆ｪ蜈亥叙蠕玲ｸ医∩ 竊・繧ｹ繧ｭ繝・・
+
+    const value = spec.getValue();
+    if (!value?.trim()) continue; // 蛟､縺檎ｩｺ縺ｾ縺溘・undefined縺ｪ繧峨メ繧ｧ繝・け荳崎ｦ・
+
+    const ev = (spec.evidence ?? "").trim();
+    if (!ev) {
+      // evidence 譛ｪ謠蝉ｾ帙↑縺ｮ縺ｫ蛟､縺後≠繧・竊・菫｡鬆ｼ縺ｧ縺阪↑縺・
+      log("evidence", `EVIDENCE_MISSING: ${spec.fieldLabel} (no evidence provided)`);
+      warnings.push(`EVIDENCE_MISSING: ${spec.fieldLabel}`);
+      spec.clearValue();
+      continue;
+    }
+
+    const evNorm = normalizeForEvidence(ev);
+
+    // rawText 縺ｫ蟄伜惠縺吶ｌ縺ｰ OK
+    if (rawNorm.includes(evNorm)) continue;
+
+    // sections・・OM逕ｱ譚･・峨↓繧ょ撫縺・粋繧上○・・RMOS 遲峨・ DOM 蜆ｪ蜈域歓蜃ｺ蟇ｾ蠢懶ｼ・
+    if (sections && sections.length > 0) {
+      const inSections = sections.some((s) => {
+        const secNorm = normalizeForEvidence(s.value);
+        return secNorm.includes(evNorm);
+      });
+      if (inSections) {
+        log("evidence", `${spec.fieldLabel}: evidence found in DOM sections (not in rawText)`, { evidence: ev });
+        continue; // sections 縺ｧ隕九▽縺九▲縺溘・縺ｧ OK
+      }
+    }
+
+    // evidence 縺・rawText 縺ｫ繧・sections 縺ｫ繧ょｭ伜惠縺励↑縺・竊・繝上Ν繧ｷ繝阪・繧ｷ繝ｧ繝ｳ縺ｮ逍代＞
+    log("evidence", `EVIDENCE_MISSING: ${spec.fieldLabel} (evidence not found in rawText or sections)`, { evidence: ev });
+    warnings.push(`EVIDENCE_MISSING: ${spec.fieldLabel}`);
+    spec.clearValue();
+  }
+
+  return { warnings };
+};
+
+// ---------------------------------------------------------------------------
+// A) 莨∵･ｭ蜷阪・霎樊嶌豁｣隕丞喧・・vidence讀懆ｨｼ蠕後↓驕ｩ逕ｨ・・
+// ---------------------------------------------------------------------------
+const applyCompanyNameNormalization = (job: JobPosting): void => {
+  if (job.company.name) {
+    const before = job.company.name;
+    job.company.name = normalizeCompanyName(before);
+    if (before !== job.company.name) {
+      log("company", `莨∵･ｭ蜷阪ｒ霎樊嶌豁｣隕丞喧: "${before}" 竊・"${job.company.name}"`);
+    }
+  }
+};
+
+// ---------------------------------------------------------------------------
+// B-2) position.title 豁｣隕丞喧: 陬・｣ｾ繝槭・繧ｫ繝ｼ髯､蜴ｻ + 螳牙・繧ｬ繝ｼ繝・
+// ---------------------------------------------------------------------------
+const normalizePositionTitle = (job: JobPosting): void => {
+  if (!job.position.title?.trim()) return;
+
+  let title = job.position.title;
+  const original = title;
+
+  // 笳・･蜍溪螺 遲峨・陬・｣ｾ繝槭・繧ｫ繝ｼ繧帝勁蜴ｻ
+  title = title.replace(/笳・^笳・*笳・g, "").trim();
+
+  // 蜑榊ｾ後ｒ蝗ｲ繧縲舌代ｒ髯､蜴ｻ・井ｸｭ霄ｫ縺ｯ菫晄戟・・
+  const bracketMatch = /^縲・.+)縲・/.exec(title);
+  if (bracketMatch) {
+    title = bracketMatch[1].trim();
+  }
+
+  // 髯､蜴ｻ蠕後↓遨ｺ縺ｫ縺ｪ縺｣縺溷ｴ蜷医・蜈・・蛟､繧剃ｿ晄戟・育ｩｺ縺ｫ縺励↑縺・ｼ・
+  if (!title) return;
+
+  // 髯､蜴ｻ蠕後・譁・ｭ怜・縺碁寐逕ｨ蠖｢諷九→縲悟ｮ悟・荳閾ｴ縲阪☆繧句ｴ蜷医・縺ｿ遨ｺ縺ｫ縺吶ｋ
+  // ・医ち繧､繝医Ν蜈ｨ菴薙′髮・畑蠖｢諷九〒縺ｯ縺ｪ縺・剞繧贋ｿ晄戟・・
+  const empType = job.position.employmentType?.trim();
+  if (empType && title === empType) {
+    log("title-normalize", `title 縺・employmentType 縺ｨ螳悟・荳閾ｴ縺ｮ縺溘ａ繧ｯ繝ｪ繧｢: "${title}"`);
+    job.position.title = "";
+    return;
+  }
+
+  if (title !== original) {
+    log("title-normalize", `title 豁｣隕丞喧: "${original}" 竊・"${title}"`);
+    job.position.title = title;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// B-3) 驛ｵ萓ｿ逡ｪ蜿ｷ縺ｮ陬懷ｮ・ rawText 縺ｫ驛ｵ萓ｿ逡ｪ蜿ｷ縺後≠繧・work.location 縺ｫ辟｡縺・ｴ蜷医↓莉倅ｸ・
+// ---------------------------------------------------------------------------
+const recoverPostalCode = (job: JobPosting, rawText: string): void => {
+  const location = job.work.location ?? "";
+  if (!location.trim()) return;
+
+  // work.location 縺ｫ譌｢縺ｫ驛ｵ萓ｿ逡ｪ蜿ｷ・医・or NNN-NNNN・峨′縺ゅｌ縺ｰ菴輔ｂ縺励↑縺・
+  if (/\d{3}-\d{4}/.test(location)) return;
+
+  // rawText 縺ｫ驛ｵ萓ｿ逡ｪ蜿ｷ縺御ｸ蛻・┌縺代ｌ縺ｰ菴輔ｂ縺励↑縺・
+  if (!/\d{3}-\d{4}/.test(rawText)) return;
+
+  // location 縺ｮ蜈磯ｭ繝・く繧ｹ繝茨ｼ磯・驕灘ｺ懃恁+蟶ょ玄逕ｺ譚代Ξ繝吶Ν・峨〒 rawText 蜀・ｒ讀懃ｴ｢
+  const searchKey = location.replace(/[\r\n]/g, " ").trim().slice(0, 30);
+  if (searchKey.length < 3) return;
+
+  const escaped = searchKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const locIndex = rawText.search(new RegExp(escaped));
+  if (locIndex < 0) return;
+
+  // 讀懃ｴ｢繧ｭ繝ｼ縺ｮ蜑肴婿 100 譁・ｭ嶺ｻ･蜀・↓驛ｵ萓ｿ逡ｪ蜿ｷ縺後≠繧後・陬懷ｮ・
+  const beforeText = rawText.slice(Math.max(0, locIndex - 100), locIndex);
+  const postalMatch = beforeText.match(/縲・(\d{3}-\d{4})/);
+  if (postalMatch) {
+    const code = `縲・{postalMatch[1]}`;
+    job.work.location = `${code}\n${location}`;
+    log("postal-code", `驛ｵ萓ｿ逡ｪ蜿ｷ繧定｣懷ｮ・ ${code}`, { location: location.slice(0, 50) });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// C) 縲先ｭ楢ｿ弱代・繝ｼ繧ｫ繝ｼ繝√ぉ繝・け: rawText 縺ｫ豁楢ｿ弱・繝ｼ繧ｫ繝ｼ縺檎┌縺代ｌ縺ｰ want 繧堤ｩｺ縺ｫ縺吶ｋ
+// ---------------------------------------------------------------------------
+const WANT_MARKERS = ["縲先ｭ楢ｿ弱・, "豁楢ｿ弱せ繧ｭ繝ｫ", "豁楢ｿ取擅莉ｶ", "縺ゅｋ縺ｨ譛帙∪縺励＞", "蟆壼庄"];
+
+const stripUnfoundedWant = (job: JobPosting, rawText: string, warnings: string[]): void => {
+  if (job.requirements.want.length === 0) return;
+  const hasWant = WANT_MARKERS.some((m) => rawText.includes(m));
+  if (!hasWant) {
+    log("want-check", "蜴滓枚縺ｫ豁楢ｿ弱・繝ｼ繧ｫ繝ｼ縺檎┌縺・◆繧・want 繧帝勁蜴ｻ", { wantCount: job.requirements.want.length });
+    warnings.push("WANT_REMOVED_NO_MARKER");
+    job.requirements.want = [];
+  }
+};
+
+// ---------------------------------------------------------------------------
+// D) 蠢・井ｸ崎ｶｳ繝ｬ繝昴・繝井ｿ晏ｭ・+ 繝ｭ繧ｰ蜃ｺ蜉・
+// ---------------------------------------------------------------------------
+type MissingRequiredReport = {
+  code: string;
+  message: string;
+  missingKeys: string[];
+  details: RequiredFieldsResult["details"];
+  evidenceWarnings: string[];
+  timestamp: string;
+  artifactDir: string;
+};
+
+const saveMissingRequiredReport = (
+  dir: string,
+  reqResult: RequiredFieldsResult,
+  evidenceWarnings: string[],
+  extraMessage?: string
+): MissingRequiredReport => {
+  const report: MissingRequiredReport = {
+    code: "REQUIRED_FIELD_MISSING",
+    message: extraMessage ?? "蠢・磯・岼縺悟叙蠕励〒縺阪∪縺帙ｓ",
+    missingKeys: reqResult.missingKeys,
+    details: reqResult.details,
+    evidenceWarnings,
+    timestamp: new Date().toISOString(),
+    artifactDir: dir,
+  };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "missing_required.json"),
+      JSON.stringify(report, null, 2),
+      "utf8"
+    );
+  } catch (e) {
+    console.error(`[missing_required] 菫晏ｭ伜､ｱ謨・(target: ${path.join(dir, "missing_required.json")}):`, e);
+  }
+
+  // D) 繧ｳ繝ｳ繧ｽ繝ｼ繝ｫ繝ｭ繧ｰ: 繝ｦ繝ｼ繧ｶ繝ｼ縺後さ繝斐・蜿ｯ閭ｽ縺ｪ蠖｢蠑・
+  console.error([
+    "========================================",
+    "FAILED: missing required",
+    `missing_required: ${JSON.stringify(reqResult.missingKeys)}`,
+    `details: ${JSON.stringify(reqResult.details, null, 2)}`,
+    `evidence_warnings: ${JSON.stringify(evidenceWarnings)}`,
+    `report: ${path.join(dir, "missing_required.json")}`,
+    "========================================",
+  ].join("\n"));
+
+  return report;
+};
+
+// ---------------------------------------------------------------------------
+// 險縺・鋤縺域､懷・繝ｬ繝昴・繝井ｿ晏ｭ假ｼ・araphrase_report.json・・
+// ---------------------------------------------------------------------------
+
+type ParaphraseReportItem = {
+  field: string;
+  generatedValue: string;
+  rule: string;
+};
+
+type ParaphraseReport = {
+  count: number;
+  strictMode: boolean;
+  items: ParaphraseReportItem[];
+  timestamp: string;
+  artifactDir: string;
+};
+
+const saveParaphraseReport = (
+  dir: string,
+  faithResult: FaithfulnessResult
+): ParaphraseReport => {
+  const items: ParaphraseReportItem[] = faithResult.missing.map((m: FaithfulnessMissing) => ({
+    field: m.path,
+    generatedValue: m.value,
+    rule: "蜴滓枚縺ｮ豁｣隕丞喧繝・く繧ｹ繝医↓驛ｨ蛻・ｸ閾ｴ縺ｧ隕九▽縺九ｉ縺ｪ縺・ｼ郁ｨ縺・鋤縺医・隕∫ｴ・・逍代＞・・,
+  }));
+
+  const report: ParaphraseReport = {
+    count: faithResult.missing.length,
+    strictMode: STRICT_NO_PARAPHRASE,
+    items,
+    timestamp: new Date().toISOString(),
+    artifactDir: dir,
+  };
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "paraphrase_report.json"),
+      JSON.stringify(report, null, 2),
+      "utf8"
+    );
+  } catch (e) {
+    console.error(`[paraphrase] 繝ｬ繝昴・繝井ｿ晏ｭ伜､ｱ謨・(target: ${path.join(dir, "paraphrase_report.json")}):`, e);
+  }
+
+  log("paraphrase", `險縺・鋤縺域､懷・繝ｬ繝昴・繝井ｿ晏ｭ・ ${report.count}莉ｶ`, { dir });
+  return report;
+};
+
+/**
+ * B) 荳ｭ髢捺・譫懃黄縺ｮ譌ｩ譛滉ｿ晏ｭ假ｼ医ヰ繝ｪ繝・・繧ｷ繝ｧ繝ｳ蜑阪↓蜻ｼ縺ｶ・・
+ */
+const saveIntermediateArtifacts = (
+  dir: string,
+  sanitized: JobPosting,
+  normalizedText: string,
+  rawHtml?: string,
+): void => {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    // job.json
+    fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify(sanitized, null, 2), "utf8");
+    // job_structured.md
+    const md = buildStructuredMarkdown(sanitized, normalizedText);
+    fs.writeFileSync(path.join(dir, "job_structured.md"), md, "utf8");
+    // job_raw.md・医∪縺辟｡縺・ｴ蜷医・縺ｿ・・
+    const rawMdPath = path.join(dir, "job_raw.md");
+    if (!fs.existsSync(rawMdPath)) {
+      fs.writeFileSync(rawMdPath, normalizedText, "utf8");
+    }
+    // rawHtml
+    if (rawHtml && typeof rawHtml === "string") {
+      const htmlPath = path.join(dir, "job_raw.html");
+      if (!fs.existsSync(htmlPath)) {
+        fs.writeFileSync(htmlPath, rawHtml, "utf8");
+      }
+    }
+  } catch (e) {
+    console.error(`[intermediate] 荳ｭ髢捺・譫懃黄菫晏ｭ伜､ｱ謨・(target: ${dir}):`, e);
+  }
+};
+
+const DATA_DIR = path.resolve(process.cwd(), "data");
+const MIN_EXTRACTED_CHARS = Number(process.env.MIN_EXTRACTED_CHARS || 300);
+
+// ---------------------------------------------------------------------------
+// OUTPUT_DIR: 繝ｦ繝ｼ繧ｶ繝ｼ謖・ｮ壹・蜃ｺ蜉帛・・・譯・ 迺ｰ蠅・､画焚・・
+//   險ｭ螳壽凾: 蜈ｨ謌先棡迚ｩ繧・OUTPUT_DIR 逶ｴ荳九↓蜃ｺ蜉幢ｼ域律莉・繝上ャ繧ｷ繝･繧ｵ繝悶ヵ繧ｩ繝ｫ繝縺ｪ縺暦ｼ・
+//   譛ｪ險ｭ螳・ 蠕捺擂騾壹ｊ DATA_DIR/YYYY-MM-DD/{company}_{position}_{hash}/
+// ---------------------------------------------------------------------------
+const OUTPUT_DIR: string | null = (() => {
+  const env = process.env.OUTPUT_DIR?.trim();
+  if (!env) return null;
+  const resolved = path.isAbsolute(env) ? env : path.resolve(process.cwd(), env);
+  return resolved;
+})();
+
+/** OUTPUT_DIR 菴ｿ逕ｨ譎ゅ・迚ｹ谿・runId 繝槭・繧ｫ繝ｼ */
+const CUSTOM_OUTPUT_RUN_ID = "__custom_output__";
+
+// ===========================================================================
+// 繝ｦ繝ｼ繝・ぅ繝ｪ繝・ぅ
+// ===========================================================================
+
+const sanitizePathSegment = (s: string, maxLen = 50): string => {
+  return s
+    .replace(/[/\\:*?"<>|]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLen) || "unknown";
+};
+
+const sanitizeFilename = (s: string, maxLen = 80): string => {
+  const t = s
+    .replace(/[/\\:*?"<>|]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLen);
+  return t || "豎ゆｺｺ諠・ｱ";
+};
+
+const buildSuggestedFilename = (_pageTitle: string | undefined, positionTitle: string, companyName?: string): string => {
+  // 蟶ｸ縺ｫ "豎ゆｺｺ逾ｨ_莨∵･ｭ蜷浩繝昴ず繧ｷ繝ｧ繝ｳ蜷・docx" 蠖｢蠑上よｬ關ｽ譎ゅ・ "荳肴・"・域耳貂ｬ遖∵ｭ｢・・
+  const company = (companyName && sanitizeFilename(companyName, 30)) || "荳肴・";
+  const position = (positionTitle && sanitizeFilename(positionTitle)) || "荳肴・";
+  return `豎ゆｺｺ逾ｨ_${company}_${position}.docx`;
+};
+
+const listToMd = (items: string[] | undefined): string => {
+  const list = (items ?? []).filter((x) => x && x.trim() !== "");
+  if (list.length === 0) return "・郁ｨ倩ｼ峨↑縺暦ｼ・;
+  return list.map((x) => `- ${x}`).join("\n");
+};
+
+const ensureDir = (dir: string): void => {
+  fs.mkdirSync(dir, { recursive: true });
+};
+
+const makeHash = (seed: string): string => {
+  return crypto.createHash("sha256").update(seed + String(Date.now())).digest("hex").slice(0, 8);
+};
+
+const dateStr = (): string => new Date().toISOString().slice(0, 10);
+
+// ---------------------------------------------------------------------------
+// runId 竊・artifactDir 縺ｮ隗｣豎ｺ
+//   OUTPUT_DIR 菴ｿ逕ｨ譎・ CUSTOM_OUTPUT_RUN_ID 竊・OUTPUT_DIR
+//   騾壼ｸｸ譎・ data/YYYY-MM-DD/{...} 竊・逶ｸ蟇ｾ繝代せ runId
+// ---------------------------------------------------------------------------
+const toRunId = (artifactDir: string): string => {
+  if (OUTPUT_DIR && artifactDir === OUTPUT_DIR) {
+    return CUSTOM_OUTPUT_RUN_ID;
+  }
+  return path.relative(DATA_DIR, artifactDir);
+};
+
+const resolveRunDir = (runId: string): string | null => {
+  // OUTPUT_DIR 菴ｿ逕ｨ譎ゅ・迚ｹ谿翫・繝ｼ繧ｫ繝ｼ
+  if (runId === CUSTOM_OUTPUT_RUN_ID && OUTPUT_DIR) {
+    try {
+      fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+      return OUTPUT_DIR;
+    } catch {
+      return null;
+    }
+  }
+  if (!runId || runId.includes("..") || path.isAbsolute(runId)) return null;
+  const resolved = path.resolve(DATA_DIR, runId);
+  if (!resolved.startsWith(DATA_DIR)) return null;
+  try {
+    if (!fs.statSync(resolved).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  return resolved;
+};
+
+// ---------------------------------------------------------------------------
+// storage.json 窶・菫晏ｭ伜・繝輔か繝ｫ繝險ｭ螳夲ｼ医し繝ｼ繝舌・蛛ｴ縺ｧ螳檎ｵ撰ｼ・
+//   迺ｰ蠅・､画焚 STORAGE_CONFIG_PATH 縺ｧ蟾ｮ縺玲崛縺亥庄閭ｽ
+// ---------------------------------------------------------------------------
+const STORAGE_CONFIG_PATH: string = (() => {
+  const env = process.env.STORAGE_CONFIG_PATH?.trim();
+  if (env) return path.isAbsolute(env) ? env : path.resolve(process.cwd(), env);
+  return path.resolve(process.cwd(), "config", "storage.json");
+})();
+
+interface StorageConfig {
+  jobDocxDir: string;
+  scoutTextDir: string;
+}
+
+const loadStorageConfig = (): StorageConfig => {
+  try {
+    const raw = fs.readFileSync(STORAGE_CONFIG_PATH, "utf8");
+    const data = JSON.parse(raw);
+    return {
+      jobDocxDir: data.jobDocxDir || "",
+      scoutTextDir: data.scoutTextDir || "",
+    };
+  } catch {
+    // 蛻晏屓: 繝・ヵ繧ｩ繝ｫ繝亥､縺ｧ storage.json 繧堤函謌・
+    const defaults: StorageConfig = {
+      jobDocxDir: path.resolve(process.cwd(), "data", "output", "docx"),
+      scoutTextDir: path.resolve(process.cwd(), "data", "output", "text"),
+    };
+    try {
+      fs.mkdirSync(path.dirname(STORAGE_CONFIG_PATH), { recursive: true });
+      fs.writeFileSync(STORAGE_CONFIG_PATH, JSON.stringify(defaults, null, 2), "utf8");
+      log("storage", `storage.json 繧貞・譛溽函謌・ ${STORAGE_CONFIG_PATH}`, defaults as unknown as Record<string, unknown>);
+    } catch { /* ignore */ }
+    return defaults;
+  }
+};
+
+/** 襍ｷ蜍墓凾縺ｫ繝・ぅ繝ｬ繧ｯ繝医Μ繧定・蜍穂ｽ懈・ */
+const ensureStorageDirs = (): void => {
+  const cfg = loadStorageConfig();
+  if (cfg.jobDocxDir) {
+    fs.mkdirSync(cfg.jobDocxDir, { recursive: true });
+    log("storage", `jobDocxDir 遒ｺ隱・菴懈・: ${cfg.jobDocxDir}`);
+  }
+  if (cfg.scoutTextDir) {
+    fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
+    log("storage", `scoutTextDir 遒ｺ隱・菴懈・: ${cfg.scoutTextDir}`);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// 繝輔ぃ繧､繝ｫ菫晏ｭ假ｼ・ender 螳御ｺ・ｾ後↓蜻ｼ縺ｳ蜃ｺ縺暦ｼ・
+//   server 蛛ｴ縺ｧ逶ｴ謗･譖ｸ縺崎ｾｼ縺ｿ 窶・chrome.downloads 縺ｯ菴ｿ繧上↑縺・
+// ---------------------------------------------------------------------------
+interface SaveResult {
+  savedFiles: string[];
+  errors: string[];
+}
+
+const saveToOutputDirs = (
+  artifactDir: string,
+  suggestedFilename: string,
+  scoutText: string | null,
+): SaveResult => {
+  const cfg = loadStorageConfig();
+  const savedFiles: string[] = [];
+  const errors: string[] = [];
+
+  // --- Word (docx) ---
+  if (cfg.jobDocxDir) {
+    try {
+      fs.mkdirSync(cfg.jobDocxDir, { recursive: true });
+      const srcDocx = path.join(artifactDir, "output.docx");
+      if (fs.existsSync(srcDocx)) {
+        const dest = path.join(cfg.jobDocxDir, suggestedFilename);
+        fs.copyFileSync(srcDocx, dest);
+        savedFiles.push(dest);
+        log("save", `Word菫晏ｭ・ ${dest}`);
+      }
+    } catch (e) {
+      const msg = `Word菫晏ｭ伜､ｱ謨・ ${e instanceof Error ? e.message : String(e)}`;
+      log("save", msg);
+      errors.push(msg);
+    }
+  }
+
+  // --- 繧ｹ繧ｫ繧ｦ繝域枚 (txt) 窶・scoutTextDir 縺ｸ ---
+  if (cfg.scoutTextDir && scoutText) {
+    try {
+      fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
+      const scoutFilename = suggestedFilename
+        .replace(/\.docx$/i, "")
+        .replace(/^豎ゆｺｺ逾ｨ_/, "繧ｹ繧ｫ繧ｦ繝域枚_") + ".txt";
+      const dest = path.join(cfg.scoutTextDir, scoutFilename);
+      fs.writeFileSync(dest, scoutText, "utf8");
+      savedFiles.push(dest);
+      log("save", `繧ｹ繧ｫ繧ｦ繝域枚菫晏ｭ・ ${dest}`);
+    } catch (e) {
+      const msg = `繧ｹ繧ｫ繧ｦ繝域枚菫晏ｭ伜､ｱ謨・ ${e instanceof Error ? e.message : String(e)}`;
+      log("save", msg);
+      errors.push(msg);
+    }
+  }
+
+  // --- 繝・く繧ｹ繝育ｳｻ (json, md) 窶・scoutTextDir 縺ｸ ---
+  if (cfg.scoutTextDir) {
+    try {
+      fs.mkdirSync(cfg.scoutTextDir, { recursive: true });
+      const baseName = suggestedFilename.replace(/\.docx$/i, "");
+      const textFiles: Array<{ src: string; destName: string }> = [
+        { src: "job.json", destName: `${baseName}.json` },
+        { src: "job_structured.md", destName: `${baseName}_structured.md` },
+        { src: "job_raw.md", destName: `${baseName}_raw.md` },
+      ];
+      for (const { src, destName } of textFiles) {
+        const srcPath = path.join(artifactDir, src);
+        if (fs.existsSync(srcPath)) {
+          const destPath = path.join(cfg.scoutTextDir, destName);
+          fs.copyFileSync(srcPath, destPath);
+          savedFiles.push(destPath);
+          log("save", `繝・く繧ｹ繝井ｿ晏ｭ・ ${destPath}`);
+        }
+      }
+    } catch (e) {
+      const msg = `繝・く繧ｹ繝井ｿ晏ｭ伜､ｱ謨・ ${e instanceof Error ? e.message : String(e)}`;
+      log("save", msg);
+      errors.push(msg);
+    }
+  }
+
+  return { savedFiles, errors };
+};
+
+// ---------------------------------------------------------------------------
+// 繝励Ξ繝薙Η繝ｼ隴ｦ蜻・
+// ---------------------------------------------------------------------------
+const buildWarnings = (job: JobPosting): string[] => {
+  const w: string[] = [];
+  // 遉ｾ莨壻ｿ晞匱繝ｻ遖丞茜蜴夂函縺ｯ optionalFieldWarnings 縺ｧ蜃ｦ逅・☆繧九◆繧√√％縺薙〒縺ｯ譎る俣螟門感蜒阪・縺ｿ
+  if (!job.work.overtime || (!job.work.overtime.details?.trim() && job.work.overtime.exists === false)) {
+    w.push("OVERTIME_MISSING: 譎る俣螟門感蜒阪・諠・ｱ縺悟叙蠕励〒縺阪∪縺帙ｓ縺ｧ縺励◆縲・);
+  }
+  return w;
+};
+
+// ---------------------------------------------------------------------------
+// buildStructuredMarkdown 窶・Canonical Key 菴ｿ逕ｨ
+// ---------------------------------------------------------------------------
+const buildStructuredMarkdown = (job: JobPosting, rawText?: string): string => {
+  const overtimeText = job.work.overtime
+    ? job.work.overtime.details
+      ? `譎る俣螟門感蜒・ ${job.work.overtime.details}`
+      : job.work.overtime.exists
+        ? "譎る俣螟門感蜒阪≠繧・
+        : ""
+    : "";
+
+  const showFO = rawText
+    ? hasFixedOvertimeKeywords(rawText)
+    : Boolean(
+        job.salary.fixedOvertime &&
+        ((job.salary.fixedOvertime.amount ?? "").trim() ||
+         (job.salary.fixedOvertime.includedHours ?? "").trim() ||
+         (job.salary.fixedOvertime.excessPayment ?? "").trim())
+      );
+
+  const foLines: string[] = [];
+  if (showFO && job.salary.fixedOvertime) {
+    const fo = job.salary.fixedOvertime;
+    if (fo.amount?.trim()) foLines.push(`- 蝗ｺ螳壽ｮ区･ｭ莉｣・磯≡鬘搾ｼ・ ${fo.amount}`);
+    if (fo.includedHours?.trim()) foLines.push(`- 蝗ｺ螳壽ｮ区･ｭ莉｣・域凾髢捺焚・・ ${fo.includedHours}`);
+    if (fo.excessPayment?.trim()) foLines.push(`- 雜・℃蛻・・謇ｱ縺・ ${fo.excessPayment}`);
+  }
+
+  const lines = [
+    `# 豎ゆｺｺ逾ｨ・域ｧ矩蛹厄ｼ荏,
+    ``,
+    `## 莨∵･ｭ`,
+    `- 莨∵･ｭ蜷・ ${(job.company.displayName ?? job.company.name) || "・井ｸ肴・・・}`,
+    job.company.summary?.trim() ? `- 莨∵･ｭ讎りｦ・ ${job.company.summary}` : ``,
+    ``,
+    `## 謗｡逕ｨ繝昴ず繧ｷ繝ｧ繝ｳ`,
+    `- 繧ｿ繧､繝医Ν: ${job.position.title || "・井ｸ肴・・・}`,
+    job.position.employmentType?.trim() ? `- 髮・畑蠖｢諷・ ${job.position.employmentType}` : ``,
+    job.position.contractTerm?.trim() ? `- 螂醍ｴ・悄髢・ ${job.position.contractTerm}` : ``,
+    job.position.probation?.trim() ? `- 隧ｦ逕ｨ譛滄俣: ${job.position.probation}` : ``,
+    ``,
+    `## 讌ｭ蜍吝・螳ｹ・亥次譁・◎縺ｮ縺ｾ縺ｾ・荏,
+    listToMd(job.job.responsibilities),
+    job.job.notes?.trim() ? `\n陬懆ｶｳ:\n${job.job.notes}` : ``,
+    ``,
+    `## 豎ゅａ繧狗ｵ碁ｨ薙・繧ｹ繧ｭ繝ｫ・亥次譁・◎縺ｮ縺ｾ縺ｾ・荏,
+    `### 蠢・・,
+    listToMd(job.requirements.must),
+    // 豁楢ｿ弱′遨ｺ縺ｪ繧蛾撼陦ｨ遉ｺ・域耳貂ｬ遖∵ｭ｢・・
+    ...(job.requirements.want.filter((x) => x.trim()).length > 0
+      ? [`### 豁楢ｿ餐, listToMd(job.requirements.want)]
+      : []),
+    ``,
+    `## 蜍､蜍呎擅莉ｶ`,
+    `- 蟆ｱ讌ｭ蝣ｴ謇: ${job.work.location || "・郁ｨ倩ｼ峨↑縺暦ｼ・}`,
+    `- 蟆ｱ讌ｭ譎る俣: ${job.work.hours || "・郁ｨ倩ｼ峨↑縺暦ｼ・}`,
+    job.work.breakTime?.trim() ? `- 莨第・譎る俣: ${job.work.breakTime}` : ``,
+    `- 莨第律莨第嚊・亥次譁・◎縺ｮ縺ｾ縺ｾ・・ ${job.work.holidays || "・郁ｨ倩ｼ峨↑縺暦ｼ・}`,
+    overtimeText ? `- ${overtimeText}` : ``,
+    ``,
+    `## 雉・≡・亥次譁・◎縺ｮ縺ｾ縺ｾ・荏,
+    `- 雉・≡: ${job.salary.summary || "・亥ｿ・茨ｼ・}`,
+    job.salary.details?.filter((x) => x.trim()).length > 0 ? `\n${listToMd(job.salary.details)}` : ``,
+    foLines.length > 0 ? `\n${foLines.join("\n")}` : ``,
+    ``,
+    // 遖丞茜蜴夂函: 遨ｺ縺ｪ繧蛾撼陦ｨ遉ｺ
+    ...(job.benefits.items.filter((x) => x.trim()).length > 0
+      ? [`## 遖丞茜蜴夂函・亥次譁・◎縺ｮ縺ｾ縺ｾ・荏, listToMd(job.benefits.items), ``]
+      : []),
+    // 遉ｾ莨壻ｿ晞匱: 遨ｺ縺ｪ繧蛾撼陦ｨ遉ｺ
+    ...(job.insurance.socialInsurance?.trim()
+      ? [`## 遉ｾ莨壻ｿ晞匱`, `- ${job.insurance.socialInsurance}`, ``]
+      : []),
+    // 驕ｸ閠・・繝ｭ繧ｻ繧ｹ: 遨ｺ縺ｪ繧蛾撼陦ｨ遉ｺ
+    ...(job.selection.process?.trim()
+      ? [`## 驕ｸ閠・・繝ｭ繧ｻ繧ｹ`, `- ${job.selection.process}`, ``]
+      : []),
+    `---`,
+    `source: ${job.source.url}`,
+  ];
+
+  return lines.filter((x) => x !== ``).join("\n");
+};
+
+// ---------------------------------------------------------------------------
+// Express
+// ---------------------------------------------------------------------------
+
+const app = express();
+const port = Number(process.env.PORT || 3000);
+const allowedOrigin = process.env.ALLOWED_ORIGIN;
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!allowedOrigin) return callback(null, true);
+      if (!origin || origin === allowedOrigin) return callback(null, true);
+      return callback(new Error("Not allowed by CORS"));
+    },
+  })
+);
+app.use(express.json({ limit: "4mb" }));
+
+// ===========================================================================
+// POST /api/extract
+//   蜈･蜉・ { rawText, rawHtml?, url?, title?, siteHint?, extractMeta?, runId? }
+//   蜃ｺ蜉・ { runId, extractedLength }
+//   job_raw.md + extract_report.json 繧剃ｿ晏ｭ・
+// ===========================================================================
+app.post("/api/extract", async (req, res) => {
+  try {
+    const { rawText, rawHtml, url, title, siteHint, extractMeta, extractedSections, extractionTrace, runId: inputRunId } = req.body ?? {};
+
+    if (!rawText || String(rawText).trim() === "") {
+      return res.status(400).json({
+        error: { code: "TEXT_EXTRACTION_EMPTY", message: "rawText is empty 窶・繝壹・繧ｸ譛ｬ譁・′蜿門ｾ励〒縺阪∪縺帙ｓ縺ｧ縺励◆縲・ },
+      });
+    }
+
+    const normalized = normalizeRawText(String(rawText));
+    const extractedLength = normalized.length;
+    log("extract", "謚ｽ蜃ｺ繝・く繧ｹ繝域枚蟄玲焚", { extractedLength, min: MIN_EXTRACTED_CHARS });
+
+    if (extractedLength === 0) {
+      return res.status(400).json({
+        error: { code: "TEXT_EXTRACTION_EMPTY", message: "謚ｽ蜃ｺ繝・く繧ｹ繝医′0譁・ｭ励〒縺吶・ },
+      });
+    }
+    if (extractedLength < MIN_EXTRACTED_CHARS) {
+      return res.status(400).json({
+        error: {
+          code: "TEXT_EXTRACTION_TOO_SHORT",
+          message: `謚ｽ蜃ｺ繝・く繧ｹ繝医′遏ｭ縺吶℃縺ｾ縺呻ｼ・{extractedLength}譁・ｭ暦ｼ峨ゅΟ繧ｰ繧､繝ｳ蠢・・譛ｬ譁・悴螻暮幕/謚ｽ蜃ｺ螟ｱ謨励・蜿ｯ閭ｽ諤ｧ縺後≠繧翫∪縺吶Ａ,
+        },
+      });
+    }
+
+    // 繝・ぅ繝ｬ繧ｯ繝医Μ豎ｺ螳・ OUTPUT_DIR 謖・ｮ壽凾縺ｯ縺昴％縺ｸ逶ｴ謗･蜃ｺ蜉・
+    const hash = makeHash(String(url ?? "") + normalized.slice(0, 200));
+    let artifactDir: string;
+    if (OUTPUT_DIR) {
+      artifactDir = OUTPUT_DIR;
+    } else if (inputRunId) {
+      const existing = resolveRunDir(inputRunId);
+      if (existing) {
+        artifactDir = existing;
+      } else {
+        artifactDir = path.join(DATA_DIR, dateStr(), `_pending_${hash}`);
+      }
+    } else {
+      artifactDir = path.join(DATA_DIR, dateStr(), `_pending_${hash}`);
+    }
+    ensureDir(artifactDir);
+    log("extract", "蜃ｺ蜉帛・", { artifactDir });
+
+    // job_raw.md
+    fs.writeFileSync(path.join(artifactDir, "job_raw.md"), normalized, "utf8");
+
+    // job_raw.html・・ontent Script 縺九ｉ騾√ｉ繧後◆ HTML・・
+    if (rawHtml && typeof rawHtml === "string") {
+      fs.writeFileSync(path.join(artifactDir, "job_raw.html"), rawHtml, "utf8");
+    }
+
+    // extracted_sections.json・・OM逕ｱ譚･縺ｮ繧ｻ繧ｯ繧ｷ繝ｧ繝ｳ蛹悶ョ繝ｼ繧ｿ・・
+    {
+      const base = Array.isArray(extractedSections) ? extractedSections : [];
+      // blockquote / >險伜捷繧ｻ繧ｯ繧ｷ繝ｧ繝ｳ繧偵・繝ｼ繧ｸ・・awHtml 縺後≠繧句ｴ蜷茨ｼ・
+      // base 縺檎ｩｺ縺ｧ繧・rawHtml 縺後≠繧後・ blockquote 謚ｽ蜃ｺ繧貞ｮ溯｡後☆繧・
+      const mergedResult =
+        rawHtml && typeof rawHtml === "string"
+          ? mergeBlockquoteSections(base, rawHtml, extractionTrace?.strategy ?? "")
+          : { sections: base, method: extractionTrace?.strategy ?? "" };
+
+      if (mergedResult.sections.length > 0) {
+        fs.writeFileSync(
+          path.join(artifactDir, "extracted_sections.json"),
+          JSON.stringify({ sections: mergedResult.sections, trace: extractionTrace ?? null }, null, 2),
+          "utf8"
+        );
+        log("extract", `DOM sections saved: ${mergedResult.sections.length}莉ｶ`, { method: mergedResult.method });
+      }
+    }
+
+    // extract_report.json
+    const report = {
+      url: url || null,
+      title: title || null,
+      siteHint: siteHint || null,
+      extractMeta: extractMeta ?? null,
+      extractedLength,
+      minExtractedChars: MIN_EXTRACTED_CHARS,
+      extractionTrace: extractionTrace ?? null,
+      sectionCount: Array.isArray(extractedSections) ? extractedSections.length : 0,
+      timestamp: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(artifactDir, "extract_report.json"), JSON.stringify(report, null, 2), "utf8");
+
+    // meta.json・亥・譛滂ｼ・
+    const meta = {
+      schemaVersion: "museum_jobposting_v0.3",
+      phase: "extracted",
+      url: url || undefined,
+      title: title || undefined,
+      siteHint: siteHint || undefined,
+      extractedLength,
+      extractionStrategy: extractionTrace?.strategy,
+      sectionCount: Array.isArray(extractedSections) ? extractedSections.length : 0,
+      savedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(artifactDir, "meta.json"), JSON.stringify(meta, null, 2), "utf8");
+
+    const runId = toRunId(artifactDir);
+    log("extract", "菫晏ｭ伜ｮ御ｺ・, { runId });
+
+    return res.json({ runId, extractedLength });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      error: { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error) },
+    });
+  }
+});
+
+// ===========================================================================
+// POST /api/structure
+//   蜈･蜉・ { runId }
+//   蜃ｺ蜉・ { runId, structuredMd, job, suggestedFilename, meta }
+//   OpenAI 竊・sanitize 竊・faithfulness 竊・requiredFields 竊・菫晏ｭ・
+// ===========================================================================
+app.post("/api/structure", async (req, res) => {
+  try {
+    const { runId } = req.body ?? {};
+
+    if (!runId || typeof runId !== "string") {
+      return res.status(400).json({
+        error: { code: "RUN_ID_REQUIRED", message: "runId 縺悟ｿ・ｦ√〒縺吶ょ・縺ｫ /api/extract 繧貞他繧薙〒縺上□縺輔＞縲・ },
+      });
+    }
+
+    const artifactDir = resolveRunDir(runId);
+    if (!artifactDir) {
+      return res.status(400).json({
+        error: { code: "RUN_NOT_FOUND", message: `runId '${runId}' 縺瑚ｦ九▽縺九ｊ縺ｾ縺帙ｓ縲Ａ },
+      });
+    }
+
+    // job_raw.md 繧定ｪｭ縺ｿ霎ｼ繧
+    const rawMdPath = path.join(artifactDir, "job_raw.md");
+    if (!fs.existsSync(rawMdPath)) {
+      return res.status(400).json({
+        error: { code: "RAW_MD_NOT_FOUND", message: "job_raw.md 縺瑚ｦ九▽縺九ｊ縺ｾ縺帙ｓ縲ょ・縺ｫ /api/extract 繧貞ｮ溯｡後＠縺ｦ縺上□縺輔＞縲・ },
+      });
+    }
+    const normalizedText = fs.readFileSync(rawMdPath, "utf8");
+
+    // meta.json 縺九ｉ陬懆ｶｳ諠・ｱ繧貞叙蠕・
+    let metaData: Record<string, unknown> = {};
+    try {
+      metaData = JSON.parse(fs.readFileSync(path.join(artifactDir, "meta.json"), "utf8"));
+    } catch { /* 辟｡縺上※繧らｶ夊｡・*/ }
+
+    const url = String(metaData.url ?? "");
+    const title = String(metaData.title ?? "");
+    const siteHint = String(metaData.siteHint ?? "unknown");
+    const jobTitle = typeof metaData.jobTitle === "string" ? metaData.jobTitle : undefined;
+
+    // (1) OpenAI 讒矩蛹・
+    log("structure", "OpenAI讒矩蛹夜幕蟋・);
+    const job = await generateJobPosting({ url, title, rawText: normalizedText, siteHint });
+    const jobWithCompliance: JobPosting = {
+      ...job,
+      compliance: job.compliance ?? { forbiddenDetected: [], warnings: [] },
+    };
+
+    // (2) sanitize・育ｦ∵ｭ｢霆｢霈蛾勁蜴ｻ・・
+    const { sanitized, forbiddenDetected } = sanitizeJobPosting(jobWithCompliance);
+    sanitized.compliance.forbiddenDetected = Array.from(
+      new Set([...sanitized.compliance.forbiddenDetected, ...forbiddenDetected])
+    );
+
+    // (2.4a) DOM sections 縺九ｉ莨夂､ｾ蜷阪ｒ蜆ｪ蜈亥叙蠕暦ｼ・awText萓晏ｭ倥ｈ繧贋ｿ｡鬆ｼ諤ｧ縺碁ｫ倥＞・・
+    const evidenceSkipFields = new Set<string>();
+    let domSectionsForEvidence: Array<{ label: string; value: string }> = [];
+    try {
+      const sectionsPath = path.join(artifactDir, "extracted_sections.json");
+      if (fs.existsSync(sectionsPath)) {
+        const secData = JSON.parse(fs.readFileSync(sectionsPath, "utf8"));
+        domSectionsForEvidence = secData.sections ?? [];
+        const compSec = domSectionsForEvidence.find((s) => s.label === "莨夂､ｾ蜷・);
+        if (compSec && compSec.value.trim()) {
+          sanitized.company.name = compSec.value.trim();
+          evidenceSkipFields.add("company.name");
+          log("field_source", `company.name source=sections (DOM蜆ｪ蜈・`, { value: compSec.value.trim() });
+        }
+      }
+    } catch { /* sections 隱ｭ縺ｿ霎ｼ縺ｿ螟ｱ謨玲凾縺ｯ OpenAI 繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ */ }
+
+    // (2.5) evidence 讀懆ｨｼ: rawText + DOM sections 繧定ｨｼ諡縺ｨ縺励※菴ｿ逕ｨ
+    const evidenceResult = validateEvidence(sanitized, normalizedText, evidenceSkipFields, domSectionsForEvidence);
+    const warnings: string[] = [...evidenceResult.warnings];
+
+    // (2.5b) DOM sections 縺ｫ繧医ｋ繝輔ぅ繝ｼ繝ｫ繝芽｣懷ｮ・+ 繧ｽ繝ｼ繧ｹ霑ｽ霍｡
+    const fieldSourceLog: Array<{ field: string; source: string; label?: string; snippet?: string }> = [];
+    try {
+      const sectionsPath = path.join(artifactDir, "extracted_sections.json");
+      if (fs.existsSync(sectionsPath)) {
+        const sectionsData = JSON.parse(fs.readFileSync(sectionsPath, "utf8"));
+        const domSections: Array<{ label: string; value: string; domTag?: string; snippet?: string }> = sectionsData.sections ?? [];
+        if (domSections.length > 0) {
+          const aliases = loadFieldAliases();
+          for (const sec of domSections) {
+            const canonicalField = aliases[sec.label] ?? null;
+            if (!canonicalField) continue;
+
+            // HRMOS: selection.process 縺ｯ DOM sections 縺九ｉ縺ｮ縺ｿ險ｱ蜿ｯ
+            if (canonicalField === "selection.process" && siteHint === "HRMOS") {
+              // DOM section 縺ｫ縺ゅｋ蝣ｴ蜷医・縺ｿ縲∝､縺後≠繧後・險ｭ螳・
+              if (!sanitized.selection.process?.trim() && sec.value.trim()) {
+                sanitized.selection.process = sec.value.trim();
+                fieldSourceLog.push({ field: "selection.process", source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
+                log("field_source", `selection.process source=sections label=${sec.label}`, { snippet: sec.value.slice(0, 120) });
+              }
+              continue;
+            }
+
+            // 豎守畑: OpenAI 縺梧歓蜃ｺ縺ｧ縺阪↑縺九▲縺溘ヵ繧｣繝ｼ繝ｫ繝峨ｒ sections 縺ｧ陬懷ｮ・
+            const current = getNestedValue(sanitized, canonicalField);
+            if (!current || (typeof current === "string" && !current.trim())) {
+              setNestedValue(sanitized, canonicalField, sec.value.trim());
+              fieldSourceLog.push({ field: canonicalField, source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
+              log("field_source", `${canonicalField} source=sections label=${sec.label}`, { snippet: sec.value.slice(0, 120) });
+            } else {
+              fieldSourceLog.push({ field: canonicalField, source: "openai", snippet: (typeof current === "string" ? current : "").slice(0, 120) });
+            }
+          }
+
+          // HRMOS: selection.process 縺・rawText 逕ｱ譚･縺ｧ隱､謚ｽ蜃ｺ縺ｮ蜿ｯ閭ｽ諤ｧ縺後≠繧句ｴ蜷医・繧ｯ繝ｪ繧｢
+          if (siteHint === "HRMOS" && sanitized.selection.process?.trim()) {
+            const fromSections = fieldSourceLog.some((l) => l.field === "selection.process" && l.source === "sections");
+            if (!fromSections) {
+              log("field_source", "selection.process cleared (HRMOS: not from DOM sections)");
+              sanitized.selection.process = "";
+            }
+          }
+        }
+      }
+    } catch (e) {
+      log("field_source", "extracted_sections.json 縺ｮ隱ｭ縺ｿ霎ｼ縺ｿ繧ｨ繝ｩ繝ｼ・育┌隕悶＠縺ｦ邯夊｡鯉ｼ・, { error: String(e) });
+    }
+
+    // (2.6) 莨∵･ｭ蜷阪・豁｣隕丞喧・医ヨ繝ｪ繝縺ｮ縺ｿ縲ゅワ繝ｼ繝峨さ繝ｼ繝芽ｾ樊嶌縺ｯ蟒・ｭ｢貂医∩・・
+    applyCompanyNameNormalization(sanitized);
+
+    // (2.6b) position.title 豁｣隕丞喧・遺螺諤･蜍溪螺繝ｻ縲舌鷹勁蜴ｻ + 螳牙・繧ｬ繝ｼ繝会ｼ・
+    normalizePositionTitle(sanitized);
+
+    // (2.6c) 驛ｵ萓ｿ逡ｪ蜿ｷ縺ｮ陬懷ｮ鯉ｼ・awText 縺ｫ縺ゅｊ work.location 縺ｫ辟｡縺・ｴ蜷茨ｼ・
+    recoverPostalCode(sanitized, normalizedText);
+
+    // (2.7) 縲先ｭ楢ｿ弱代・繝ｼ繧ｫ繝ｼ繝√ぉ繝・け: 蜴滓枚縺ｫ辟｡縺・ｭ楢ｿ弱せ繧ｭ繝ｫ縺ｯ髯､蜴ｻ
+    stripUnfoundedWant(sanitized, normalizedText, warnings);
+
+    // (2.8) company_key 隗｣豎ｺ・・lias螳悟・荳閾ｴ 竊・hints驛ｨ蛻・ｸ閾ｴ縺ｮ繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ・・
+    let companyKey = resolveCompanyKey(sanitized.company.name);
+    if (!companyKey) {
+      companyKey = resolveCompanyKeyWithHints(sanitized.company.name);
+    }
+    if (companyKey) {
+      log("company", `company_key 隗｣豎ｺ: "${sanitized.company.name}" 竊・"${companyKey}"`);
+    }
+
+    // (2.9) 陦ｨ遉ｺ莨夂､ｾ蜷阪・豁｣隕丞喧・亥次譁・company.name 縺ｯ螟画峩縺励↑縺・ｼ・
+    const displayName = resolveDisplayName(sanitized, companyKey);
+    if (displayName && displayName !== sanitized.company.name) {
+      log("company", `displayName 險ｭ螳・ "${displayName}"・亥次譁・ "${sanitized.company.name}"・荏);
+    }
+
+    // D) company_profiles.json 縺ｮ螳壼梛蟾ｮ縺苓ｾｼ縺ｿ・・鬆・岼縺ｮ縺ｿ: hours/holidays/benefits/insurance・・
+    const defaultsResult = applyCompanyDefaults(sanitized, companyKey);
+    if (defaultsResult.applied) {
+      log("inject", `companyKey=${companyKey}, fields=${defaultsResult.appliedFields.join(",")}`, {
+        sources: defaultsResult.sources,
+      });
+    }
+
+    // 譌ｧ company_static 縺ｯ荳倶ｽ堺ｺ呈鋤縺ｨ縺励※谿九☆・・rofiles 縺ｧ蝓九∪繧峨↑縺九▲縺溷・繧定｣懷ｮ鯉ｼ・
+    const mergeResult = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
+    if (mergeResult.staticApplied) {
+      log("company", "company_static 豕ｨ蜈･", { keys: mergeResult.staticAppliedKeys });
+    }
+
+    // 豕ｨ蜈･縺輔ｌ縺溘ヵ繧｣繝ｼ繝ｫ繝峨・荳隕ｧ・・aithfulness 髯､螟也畑・・
+    const injectedFields = [
+      ...defaultsResult.appliedFields,
+      ...mergeResult.staticAppliedKeys,
+    ];
+
+    // 譎る俣螟門感蜒・ 諠・ｱ縺檎┌縺・ｴ蜷医・鬆・岼閾ｪ菴薙ｒ蜑企勁
+    if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
+      delete sanitized.work.overtime;
+    }
+
+    // (3) B) 荳ｭ髢捺・譫懃黄繧貞・陦御ｿ晏ｭ假ｼ医ヰ繝ｪ繝・・繧ｷ繝ｧ繝ｳ螟ｱ謨励〒繧よｮ九☆・・
+    saveIntermediateArtifacts(artifactDir, sanitized, normalizedText);
+
+    // (4) 遨ｺ縺ｮ豎ゆｺｺ逾ｨ繧ｬ繝ｼ繝会ｼ井ｼ∵･ｭ蜷阪・繝昴ず繧ｷ繝ｧ繝ｳ蜷阪・蛛懈ｭ｢譚｡莉ｶ・・
+    if (!sanitized.company?.name?.trim()) {
+      const reqResult = requiredFieldsCheck(sanitized);
+      saveMissingRequiredReport(artifactDir, reqResult, warnings, "讒矩蛹也ｵ先棡縺ｫ莨∵･ｭ蜷阪′縺ゅｊ縺ｾ縺帙ｓ縲ゅ・繝ｼ繧ｸ縺梧ｱゆｺｺ諠・ｱ縺ｧ縺ｯ縺ｪ縺・庄閭ｽ諤ｧ縺後≠繧翫∪縺吶・);
+      return res.status(400).json({
+        error: {
+          code: "JOB_JSON_EMPTY_OR_INVALID",
+          message: "讒矩蛹也ｵ先棡縺ｫ莨∵･ｭ蜷阪′縺ゅｊ縺ｾ縺帙ｓ縲ゅ・繝ｼ繧ｸ縺梧ｱゆｺｺ諠・ｱ縺ｧ縺ｯ縺ｪ縺・庄閭ｽ諤ｧ縺後≠繧翫∪縺吶・,
+          missing: ["company.name", ...reqResult.missingKeys],
+          details: reqResult.details,
+          warnings,
+        },
+      });
+    }
+    if (!sanitized.position?.title?.trim()) {
+      const reqResult = requiredFieldsCheck(sanitized);
+      saveMissingRequiredReport(artifactDir, reqResult, warnings, "讒矩蛹也ｵ先棡縺ｫ繝昴ず繧ｷ繝ｧ繝ｳ蜷阪′縺ゅｊ縺ｾ縺帙ｓ縲・);
+      return res.status(400).json({
+        error: {
+          code: "JOB_JSON_EMPTY_OR_INVALID",
+          message: "讒矩蛹也ｵ先棡縺ｫ繝昴ず繧ｷ繝ｧ繝ｳ蜷阪′縺ゅｊ縺ｾ縺帙ｓ縲・,
+          missing: ["position.title", ...reqResult.missingKeys],
+          details: reqResult.details,
+          warnings,
+        },
+      });
+    }
+
+    // (5) 逵溘・蠢・域ｬ關ｽ繝√ぉ繝・け・亥●豁｢譚｡莉ｶ・俄・讌ｭ蜍吝・螳ｹ/蜍､蜍吝慍/雉・≡
+    //     overrides / company_static 驕ｩ逕ｨ蠕後↓蛻､螳夲ｼ亥沂縺ｾ縺｣縺ｦ縺・ｌ縺ｰ騾夐℃・・
+    const reqResult = requiredFieldsCheck(sanitized);
+    if (!reqResult.ok) {
+      saveMissingRequiredReport(artifactDir, reqResult, warnings);
+      return res.status(400).json({
+        error: {
+          code: "REQUIRED_FIELD_MISSING",
+          message: `蠢・磯・岼縺悟叙蠕励〒縺阪∪縺帙ｓ: ${reqResult.missingKeys.join(", ")}`,
+          missing: reqResult.missingKeys,
+          details: reqResult.details,
+          warnings,
+        },
+      });
+    }
+
+    // (5.5) 莉ｻ諢城・岼縺ｮ谺關ｽ隴ｦ蜻奇ｼ亥●豁｢縺励↑縺・ｼ・
+    const optResult = optionalFieldWarnings(sanitized);
+    if (optResult.warnings.length > 0) {
+      warnings.push(...optResult.warnings);
+      log("structure", "莉ｻ諢城・岼谺關ｽ・亥●豁｢縺ｪ縺暦ｼ・, { missing: optResult.warnings });
+    }
+
+    // (6) faithfulness 繝√ぉ繝・け・亥ｸｸ縺ｫ隴ｦ蜻翫・縺ｿ 窶・蛛懈ｭ｢縺励↑縺・ｼ・
+    //     overrides / company_static 縺ｧ豕ｨ蜈･縺励◆繝輔ぅ繝ｼ繝ｫ繝峨・髯､螟・
+    const faithResult = faithfulnessCheck(sanitized, normalizedText, injectedFields);
+    const faithErrors = toFaithfulnessErrors(faithResult);
+
+    if (!faithResult.ok) {
+      log("structure", "險縺・鋤縺域､懷・・郁ｭｦ蜻奇ｼ・, { count: faithResult.missing.length });
+
+      // paraphrase_report.json 繧貞ｿ・★菫晏ｭ假ｼ域ｹ諡繧呈ｮ九☆・・
+      saveParaphraseReport(artifactDir, faithResult);
+
+      // 隴ｦ蜻翫→縺励※險倬鹸縺怜・逅・ｶ夊｡鯉ｼ亥●豁｢縺励↑縺・ｼ・
+      warnings.push(`PARAPHRASE_WARNING: 蜴滓枚縺ｨ逡ｰ縺ｪ繧玖｡ｨ迴ｾ縺ｮ蜿ｯ閭ｽ諤ｧ・・{faithResult.missing.length}莉ｶ・峨りｩｳ邏ｰ縺ｯ paraphrase_report.json 繧堤｢ｺ隱阪＠縺ｦ縺上□縺輔＞縲Ａ);
+    }
+
+    // (6.5) 繝励Ξ繝薙Η繝ｼ隴ｦ蜻・
+    warnings.push(...buildWarnings(sanitized));
+    warnings.push(...sanitized.compliance.warnings);
+
+    // 蝗ｺ螳壽ｮ区･ｭ莉｣陦ｨ遉ｺ繝輔Λ繧ｰ
+    const showFixedOvertime = hasFixedOvertimeKeywords(normalizedText);
+
+    // (7) 繝・ぅ繝ｬ繧ｯ繝医Μ蜷阪ｒ豁｣蠑丞錐縺ｫ譖ｴ譁ｰ・・pending_ 竊・company_position_hash・・
+    //     OUTPUT_DIR 菴ｿ逕ｨ譎ゅ・繝ｪ繝阪・繝荳崎ｦ・
+    let finalDir = artifactDir;
+    let finalRunId = runId;
+    if (!OUTPUT_DIR) {
+      const dirName = path.basename(artifactDir);
+      if (dirName.startsWith("_pending_")) {
+        const hash = dirName.replace("_pending_", "");
+        const companyPart = sanitizePathSegment(sanitized.company.name);
+        const positionPart = sanitizePathSegment(sanitized.position.title);
+        const newDirName = `${companyPart}_${positionPart}_${hash}`;
+        const newDir = path.join(path.dirname(artifactDir), newDirName);
+        try {
+          fs.renameSync(artifactDir, newDir);
+          finalDir = newDir;
+          finalRunId = toRunId(newDir);
+          log("structure", "繝・ぅ繝ｬ繧ｯ繝医Μ蜷肴峩譁ｰ", { from: dirName, to: newDirName });
+        } catch {
+          // rename 螟ｱ謨励・辟｡隕厄ｼ亥・縺ｮ繝代せ繧剃ｽｿ縺・ｶ壹￠繧具ｼ・
+        }
+      }
+    }
+
+    // (8) 謌先棡迚ｩ菫晏ｭ・
+    const structuredMd = buildStructuredMarkdown(sanitized, normalizedText);
+
+    const jobWithMeta: Record<string, unknown> = { ...sanitized };
+    if (mergeResult.staticApplied) {
+      jobWithMeta.static_applied = true;
+      jobWithMeta.static_applied_keys = mergeResult.staticAppliedKeys;
+    }
+    // 逶｣譟ｻ逕ｨ: injected 繝｡繧ｿ繝・・繧ｿ
+    if (defaultsResult.applied) {
+      jobWithMeta.meta = {
+        injected: {
+          fields: defaultsResult.appliedFields,
+          sources: defaultsResult.sources,
+        },
+      };
+    }
+    fs.writeFileSync(path.join(finalDir, "job.json"), JSON.stringify(jobWithMeta, null, 2), "utf8");
+    fs.writeFileSync(path.join(finalDir, "job_structured.md"), structuredMd, "utf8");
+
+    // meta.json 譖ｴ譁ｰ
+    const updatedMeta = {
+      ...metaData,
+      schemaVersion: "museum_jobposting_v0.3",
+      phase: "structured",
+      warnings,
+      faithViolations: faithErrors.length > 0 ? faithErrors : undefined,
+      showFixedOvertime,
+      companyName: sanitized.company.displayName ?? sanitized.company.name,
+      companyNameOriginal: sanitized.company.name,
+      companyKey: companyKey ?? undefined,
+      provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
+      injected: defaultsResult.applied
+        ? { fields: defaultsResult.appliedFields, sources: defaultsResult.sources, sourceUrl: defaultsResult.sourceUrl }
+        : undefined,
+      fieldSourceLog: fieldSourceLog.length > 0 ? fieldSourceLog : undefined,
+      positionTitle: sanitized.position.title,
+      jobTitle,
+      structuredAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(finalDir, "meta.json"), JSON.stringify(updatedMeta, null, 2), "utf8");
+
+    log("structure", "菫晏ｭ伜ｮ御ｺ・, { runId: finalRunId, outputDir: finalDir });
+
+    return res.json({
+      runId: finalRunId,
+      structuredMd,
+      job: sanitized,
+      suggestedFilename: buildSuggestedFilename(jobTitle ?? title, sanitized.position.title, sanitized.company.displayName ?? sanitized.company.name),
+      meta: {
+        warnings,
+        faithViolations: faithErrors.length > 0 ? faithErrors : undefined,
+        showFixedOvertime,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    const detail = error instanceof Error ? error.message : String(error);
+    const status = (error as any)?.status ?? (error as any)?.response?.status;
+    let code = "INTERNAL_ERROR";
+    let message = "荳肴・縺ｪ繧ｨ繝ｩ繝ｼ縺檎匱逕溘＠縺ｾ縺励◆";
+    if (status === 429 || detail.includes("429") || detail.includes("quota")) {
+      code = "OPENAI_QUOTA_EXCEEDED";
+      message = "OpenAI API縺ｮ蛻ｩ逕ｨ荳企剞縺ｫ驕斐＠縺ｦ縺・∪縺吶・;
+    } else if (detail.includes("LLM_INVALID_JSON")) {
+      code = "LLM_INVALID_JSON";
+      message = "AI縺ｮ讒矩蛹也ｵ先棡縺御ｸ肴ｭ｣縺ｧ縺吶ゅｂ縺・ｸ蠎ｦ縺願ｩｦ縺励￥縺縺輔＞縲・;
+    } else if (detail) {
+      message = detail;
+    }
+    return res.status(500).json({ error: { code, message, detail } });
+  }
+});
+
+// ===========================================================================
+// GET /api/preview
+//   蜈･蜉・ ?runId=...
+//   蜃ｺ蜉・ { runId, structuredMd, warnings, faithViolations }
+//   render 蜑阪↓蠢・★蜻ｼ縺ｶ・育｢ｺ隱咲畑・・
+// ===========================================================================
+app.get("/api/preview", (req, res) => {
+  try {
+    const runId = String(req.query.runId ?? "");
+    if (!runId) {
+      return res.status(400).json({
+        error: { code: "RUN_ID_REQUIRED", message: "runId 繧ｯ繧ｨ繝ｪ繝代Λ繝｡繝ｼ繧ｿ縺悟ｿ・ｦ√〒縺吶・ },
+      });
+    }
+
+    const artifactDir = resolveRunDir(runId);
+    if (!artifactDir) {
+      return res.status(400).json({
+        error: { code: "RUN_NOT_FOUND", message: `runId '${runId}' 縺瑚ｦ九▽縺九ｊ縺ｾ縺帙ｓ縲Ａ },
+      });
+    }
+
+    // job_structured.md
+    const mdPath = path.join(artifactDir, "job_structured.md");
+    if (!fs.existsSync(mdPath)) {
+      return res.status(400).json({
+        error: { code: "STRUCTURED_MD_NOT_FOUND", message: "job_structured.md 縺後≠繧翫∪縺帙ｓ縲ょ・縺ｫ /api/structure 繧貞ｮ溯｡後＠縺ｦ縺上□縺輔＞縲・ },
+      });
+    }
+    const structuredMd = fs.readFileSync(mdPath, "utf8");
+
+    // meta.json
+    let meta: Record<string, unknown> = {};
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(artifactDir, "meta.json"), "utf8"));
+    } catch { /* ignore */ }
+
+    // job.json
+    let job: JobPosting | null = null;
+    try {
+      job = JSON.parse(fs.readFileSync(path.join(artifactDir, "job.json"), "utf8"));
+    } catch { /* ignore */ }
+
+    return res.json({
+      runId,
+      structuredMd,
+      job,
+      warnings: meta.warnings ?? [],
+      faithViolations: meta.faithViolations ?? [],
+      showFixedOvertime: meta.showFixedOvertime ?? true,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      error: { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error) },
+    });
+  }
+});
+
+// ===========================================================================
+// GET /api/storage 窶・菫晏ｭ伜・繝輔か繝ｫ繝險ｭ螳壹ｒ霑斐☆・郁ｪｭ縺ｿ蜿悶ｊ蟆ら畑・・
+// ===========================================================================
+app.get("/api/storage", (_req, res) => {
+  try {
+    const cfg = loadStorageConfig();
+    return res.json(cfg);
+  } catch (e) {
+    return res.status(500).json({ error: { message: String(e) } });
+  }
+});
+
+// ===========================================================================
+// POST /api/render
+//   蜈･蜉・ { runId, approve: true }
+//   蜃ｺ蜉・ { savedFiles, saveErrors, suggestedFilename, meta }
+//   菫晏ｭ俶ｸ医∩ job.json 竊・繝・Φ繝励Ξ蟾ｮ縺苓ｾｼ縺ｿ 竊・output.docx 菫晏ｭ・竊・霑泌唆
+// ===========================================================================
+app.post("/api/render", async (req, res) => {
+  try {
+    const { runId, approve } = req.body ?? {};
+
+    // runId 縺ｯ繝ｬ繧ｬ繧ｷ繝ｼ縺ｮ sessionId 繧ょ女縺大・繧後ｋ
+    const id = runId ?? (req.body as any)?.sessionId;
+
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({
+        error: { code: "RUN_ID_REQUIRED", message: "runId 縺悟ｿ・ｦ√〒縺吶・ },
+      });
+    }
+    if (approve !== true && approve !== undefined) {
+      // approve 縺梧・遉ｺ逧・↓ false 縺ｪ繧峨ヶ繝ｭ繝・け
+      // undefined 縺ｯ莠呈鋤・域立 /api/render 縺ｯ approve 辟｡縺励〒蜻ｼ縺ｹ縺滂ｼ・
+    }
+
+    const artifactDir = resolveRunDir(id);
+    if (!artifactDir) {
+      return res.status(400).json({
+        error: { code: "RUN_NOT_FOUND", message: `runId '${id}' 縺瑚ｦ九▽縺九ｊ縺ｾ縺帙ｓ縲Ａ },
+      });
+    }
+
+    // job.json
+    const jobJsonPath = path.join(artifactDir, "job.json");
+    if (!fs.existsSync(jobJsonPath)) {
+      return res.status(400).json({
+        error: { code: "JOB_JSON_NOT_FOUND", message: "job.json 縺瑚ｦ九▽縺九ｊ縺ｾ縺帙ｓ縲ょ・縺ｫ /api/structure 繧貞ｮ溯｡後＠縺ｦ縺上□縺輔＞縲・ },
+      });
+    }
+    const sanitized: JobPosting = JSON.parse(fs.readFileSync(jobJsonPath, "utf8"));
+
+    // 蠢・磯・岼繝√ぉ繝・け・・ender 蜑肴怙邨る亟陦幢ｼ・
+    const reqResult = requiredFieldsCheck(sanitized);
+    if (!reqResult.ok) {
+      return res.status(400).json({
+        error: {
+          code: "REQUIRED_FIELD_MISSING",
+          message: "蠢・磯・岼縺悟叙蠕励〒縺阪∪縺帙ｓ",
+          missing: reqResult.missingKeys,
+        },
+      });
+    }
+
+    // faithfulness 繝√ぉ繝・け・・ender 蜑肴怙邨る亟陦・窶・蟶ｸ縺ｫ隴ｦ蜻翫・縺ｿ縲∝●豁｢縺励↑縺・ｼ・
+    // overrides / company_static 縺ｧ豕ｨ蜈･縺励◆繝輔ぅ繝ｼ繝ｫ繝峨・髯､螟・
+    let showFixedOvertime = true;
+    try {
+      const rawMd = fs.readFileSync(path.join(artifactDir, "job_raw.md"), "utf8");
+
+      // meta.json 縺九ｉ豕ｨ蜈･貂医∩繝輔ぅ繝ｼ繝ｫ繝峨ｒ蜿門ｾ暦ｼ・aithfulness 髯､螟也畑・・
+      let renderInjectedFields: string[] = [];
+      try {
+        const metaForRender = JSON.parse(fs.readFileSync(path.join(artifactDir, "meta.json"), "utf8"));
+        if (metaForRender.injected?.fields) {
+          renderInjectedFields.push(...metaForRender.injected.fields);
+        }
+        if (metaForRender.provenance) {
+          for (const [field, source] of Object.entries(metaForRender.provenance)) {
+            if (source === "company_static" && !renderInjectedFields.includes(field)) {
+              renderInjectedFields.push(field);
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      const faithResult = faithfulnessCheck(sanitized, rawMd, renderInjectedFields);
+      if (!faithResult.ok) {
+        saveParaphraseReport(artifactDir, faithResult);
+        log("render", "險縺・鋤縺域､懷・・郁ｭｦ蜻翫・縺ｿ・・, { count: faithResult.missing.length });
+      }
+      showFixedOvertime = hasFixedOvertimeKeywords(rawMd);
+    } catch { /* job_raw.md 縺檎┌縺代ｌ縺ｰ繧ｹ繧ｭ繝・・ */ }
+
+    // meta.json 縺ｮ showFixedOvertime 繧貞━蜈・
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(artifactDir, "meta.json"), "utf8"));
+      if (typeof meta.showFixedOvertime === "boolean") {
+        showFixedOvertime = meta.showFixedOvertime;
+      }
+    } catch { /* ignore */ }
+
+    // 繝・Φ繝励Ξ繝ｼ繝郁ｧ｣豎ｺ
+    let templatePath: string;
+    try {
+      templatePath = resolveTemplatePath();
+    } catch (e) {
+      return res.status(500).json({
+        error: { code: "TEMPLATE_NOT_FOUND_OR_EMPTY", message: e instanceof Error ? e.message : String(e) },
+      });
+    }
+    const tStat = getTemplateStat(templatePath);
+    if (!tStat.exists || tStat.size === 0) {
+      return res.status(500).json({
+        error: { code: "TEMPLATE_NOT_FOUND_OR_EMPTY", message: `繝・Φ繝励Ξ繝ｼ繝医′蟄伜惠縺励↑縺・°0繝舌う繝医〒縺・ ${templatePath}` },
+      });
+    }
+
+    // Word 逕滓・
+    let docxBuffer: Buffer;
+    try {
+      log("render", "Word蟾ｮ縺苓ｾｼ縺ｿ髢句ｧ・, { templatePath, showFixedOvertime });
+      let jobTitle: string | undefined;
+      try {
+        const m = JSON.parse(fs.readFileSync(path.join(artifactDir, "meta.json"), "utf8"));
+        jobTitle = m.jobTitle;
+      } catch { /* ignore */ }
+
+      docxBuffer = await renderJobDocx(sanitized, templatePath, { jobTitle, showFixedOvertime });
+      log("render", "Word蟾ｮ縺苓ｾｼ縺ｿ螳御ｺ・, { outputSize: docxBuffer.length });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({
+        error: { code: "DOCX_RENDER_FAIL", message: "Word逕滓・縺ｫ螟ｱ謨励＠縺ｾ縺励◆", detail: error instanceof Error ? error.message : String(error) },
+      });
+    }
+
+    // 繧ｹ繧ｫ繧ｦ繝域枚逕滓・
+    const scoutText = await generateScoutText(sanitized);
+
+    // output.docx 菫晏ｭ・
+    fs.writeFileSync(path.join(artifactDir, "output.docx"), docxBuffer);
+    log("render", "output.docx 菫晏ｭ伜ｮ御ｺ・, { dir: artifactDir });
+
+    // meta.json 譖ｴ譁ｰ
+    try {
+      const metaPath = path.join(artifactDir, "meta.json");
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      meta.phase = "rendered";
+      meta.renderedAt = new Date().toISOString();
+      meta.templatePath = templatePath;
+      meta.templateSize = tStat.size;
+      meta.docxSize = docxBuffer.length;
+      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+    } catch { /* ignore */ }
+
+    const suggestedFilename = buildSuggestedFilename(sanitized.position.title, sanitized.position.title, sanitized.company.displayName ?? sanitized.company.name);
+
+    // storage.json 縺ｮ菫晏ｭ伜・縺ｸ譖ｸ縺榊・縺・
+    const saveResult = saveToOutputDirs(artifactDir, suggestedFilename, scoutText);
+
+    return res.json({
+      suggestedFilename,
+      savedFiles: saveResult.savedFiles,
+      saveErrors: saveResult.errors,
+      meta: { warnings: sanitized.compliance?.warnings ?? [] },
+    });
+  } catch (error) {
+    console.error(error);
+    const detail = error instanceof Error ? error.message : String(error);
+    let code = "INTERNAL_ERROR";
+    let message = "荳肴・縺ｪ繧ｨ繝ｩ繝ｼ縺檎匱逕溘＠縺ｾ縺励◆";
+    if (detail.includes("繝・Φ繝励Ξ繝ｼ繝・)) {
+      code = "TEMPLATE_NOT_FOUND_OR_EMPTY";
+      message = detail;
+    } else if (detail.includes("Word") || detail.includes("docx")) {
+      code = "DOCX_RENDER_FAIL";
+      message = detail;
+    } else if (detail) {
+      message = detail;
+    }
+    return res.status(500).json({ error: { code, message, detail } });
+  }
+});
+
+// ===========================================================================
+// POST /api/generate 窶・莠呈鋤繧ｨ繝ｳ繝峨・繧､繝ｳ繝・
+//   蜀・Κ縺ｧ extract 竊・structure 繧帝・↓螳溯｡後☆繧九・
+//   諡｡蠑ｵ讖溯・縺ｮ GENERATE_JOB_PREVIEW 縺ｧ菴ｿ逕ｨ縲・
+//   render 縺ｯ縺励↑縺・ｼ医・繝ｬ繝薙Η繝ｼ遒ｺ隱榊ｾ後↓ /api/render 繧貞他縺ｶ・峨・
+// ===========================================================================
+app.post("/api/generate", async (req, res) => {
+  try {
+    const { url, title, rawText, rawHtml, siteHint, jobTitle, extractMeta, extractedSections: genSections, extractionTrace: genTrace } = req.body ?? {};
+
+    // --- extract 逶ｸ蠖・---
+    if (!rawText || String(rawText).trim() === "") {
+      return res.status(400).json({
+        error: { code: "TEXT_EXTRACTION_EMPTY", message: "rawText is empty 窶・繝壹・繧ｸ譛ｬ譁・′蜿門ｾ励〒縺阪∪縺帙ｓ縺ｧ縺励◆縲・ },
+      });
+    }
+
+    const normalized = normalizeRawText(String(rawText));
+    const extractedLength = normalized.length;
+    log("generate", "謚ｽ蜃ｺ繝・く繧ｹ繝域枚蟄玲焚", { extractedLength, min: MIN_EXTRACTED_CHARS });
+
+    if (extractedLength === 0) {
+      return res.status(400).json({
+        error: { code: "TEXT_EXTRACTION_EMPTY", message: "謚ｽ蜃ｺ繝・く繧ｹ繝医′0譁・ｭ励〒縺吶・ },
+      });
+    }
+    if (extractedLength < MIN_EXTRACTED_CHARS) {
+      return res.status(400).json({
+        error: {
+          code: "TEXT_EXTRACTION_TOO_SHORT",
+          message: `謚ｽ蜃ｺ繝・く繧ｹ繝医′遏ｭ縺吶℃縺ｾ縺呻ｼ・{extractedLength}譁・ｭ暦ｼ峨Ａ,
+        },
+      });
+    }
+
+    // --- structure 逶ｸ蠖・---
+    log("generate", "OpenAI讒矩蛹夜幕蟋・);
+    const job = await generateJobPosting({
+      url: String(url ?? ""),
+      title: String(title ?? ""),
+      rawText: normalized,
+      siteHint: String(siteHint ?? "unknown"),
+    });
+
+    const jobWithCompliance: JobPosting = {
+      ...job,
+      compliance: job.compliance ?? { forbiddenDetected: [], warnings: [] },
+    };
+
+    const { sanitized, forbiddenDetected } = sanitizeJobPosting(jobWithCompliance);
+    sanitized.compliance.forbiddenDetected = Array.from(
+      new Set([...sanitized.compliance.forbiddenDetected, ...forbiddenDetected])
+    );
+
+    // blockquote / >險伜捷繧ｻ繧ｯ繧ｷ繝ｧ繝ｳ繧・genSections 縺ｫ繝槭・繧ｸ・・awHtml 縺後≠繧句ｴ蜷医・縺ｿ・・
+    const mergedGenSections =
+      Array.isArray(genSections) && rawHtml && typeof rawHtml === "string"
+        ? mergeBlockquoteSections(genSections, rawHtml, genTrace?.strategy ?? "").sections
+        : (genSections ?? []);
+
+    // DOM sections 縺九ｉ莨夂､ｾ蜷阪ｒ蜆ｪ蜈亥叙蠕暦ｼ・awText萓晏ｭ倥ｈ繧贋ｿ｡鬆ｼ諤ｧ縺碁ｫ倥＞・・
+    const genEvidenceSkipFields = new Set<string>();
+    if (Array.isArray(mergedGenSections)) {
+      const compSec = mergedGenSections.find((s: { label: string; value?: string }) => s.label === "莨夂､ｾ蜷・);
+      if (compSec && compSec.value?.trim()) {
+        sanitized.company.name = compSec.value.trim();
+        genEvidenceSkipFields.add("company.name");
+        log("field_source", `company.name source=sections (DOM蜆ｪ蜈・`, { value: compSec.value.trim() });
+      }
+    }
+
+    // evidence 讀懆ｨｼ: rawText + DOM sections 繧定ｨｼ諡縺ｨ縺励※菴ｿ逕ｨ
+    const evidenceResult = validateEvidence(
+      sanitized,
+      normalized,
+      genEvidenceSkipFields,
+      mergedGenSections as Array<{ label: string; value: string }>
+    );
+    const warnings: string[] = [...evidenceResult.warnings];
+
+    // DOM sections 縺ｫ繧医ｋ繝輔ぅ繝ｼ繝ｫ繝芽｣懷ｮ鯉ｼ・enerate邨瑚ｷｯ・・
+    const genFieldSourceLog: Array<{ field: string; source: string; label?: string; snippet?: string }> = [];
+    const genSiteHint = String(siteHint ?? "unknown");
+    if (mergedGenSections.length > 0) {
+      const aliases = loadFieldAliases();
+      for (const sec of mergedGenSections) {
+        const canonicalField = aliases[sec.label] ?? null;
+        if (!canonicalField) continue;
+        if (canonicalField === "selection.process" && genSiteHint === "HRMOS") {
+          if (!sanitized.selection.process?.trim() && sec.value?.trim()) {
+            sanitized.selection.process = sec.value.trim();
+            genFieldSourceLog.push({ field: "selection.process", source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
+          }
+          continue;
+        }
+        const current = getNestedValue(sanitized as unknown as Record<string, unknown>, canonicalField);
+        if (!current || (typeof current === "string" && !current.trim())) {
+          setNestedValue(sanitized as unknown as Record<string, unknown>, canonicalField, sec.value.trim());
+          genFieldSourceLog.push({ field: canonicalField, source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
+          log("field_source", `${canonicalField} source=sections label=${sec.label}`, { snippet: sec.value.slice(0, 120) });
+        }
+      }
+      if (genSiteHint === "HRMOS" && sanitized.selection.process?.trim()) {
+        const fromSections = genFieldSourceLog.some((l) => l.field === "selection.process" && l.source === "sections");
+        if (!fromSections) {
+          sanitized.selection.process = "";
+        }
+      }
+    }
+
+    // 莨∵･ｭ蜷阪・豁｣隕丞喧・医ヨ繝ｪ繝縺ｮ縺ｿ・・
+    applyCompanyNameNormalization(sanitized);
+
+    // position.title 豁｣隕丞喧・遺螺諤･蜍溪螺繝ｻ縲舌鷹勁蜴ｻ + 螳牙・繧ｬ繝ｼ繝会ｼ・
+    normalizePositionTitle(sanitized);
+
+    // 驛ｵ萓ｿ逡ｪ蜿ｷ縺ｮ陬懷ｮ鯉ｼ・awText 縺ｫ縺ゅｊ work.location 縺ｫ辟｡縺・ｴ蜷茨ｼ・
+    recoverPostalCode(sanitized, normalized);
+
+    // 縲先ｭ楢ｿ弱代・繝ｼ繧ｫ繝ｼ繝√ぉ繝・け
+    stripUnfoundedWant(sanitized, normalized, warnings);
+
+    // company_key 隗｣豎ｺ・・lias螳悟・荳閾ｴ 竊・hints驛ｨ蛻・ｸ閾ｴ縺ｮ繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ・・
+    let companyKey = resolveCompanyKey(sanitized.company.name);
+    if (!companyKey) {
+      companyKey = resolveCompanyKeyWithHints(sanitized.company.name);
+    }
+    if (companyKey) {
+      log("company", `company_key 隗｣豎ｺ: "${sanitized.company.name}" 竊・"${companyKey}"`);
+    }
+
+    // 陦ｨ遉ｺ莨夂､ｾ蜷阪・豁｣隕丞喧・亥次譁・company.name 縺ｯ螟画峩縺励↑縺・ｼ・
+    const displayName = resolveDisplayName(sanitized, companyKey);
+    if (displayName && displayName !== sanitized.company.name) {
+      log("company", `displayName 險ｭ螳・ "${displayName}"・亥次譁・ "${sanitized.company.name}"・荏);
+    }
+
+    // D) company_profiles.json 縺ｮ螳壼梛蟾ｮ縺苓ｾｼ縺ｿ・・鬆・岼縺ｮ縺ｿ: hours/holidays/benefits/insurance・・
+    const defaultsResult = applyCompanyDefaults(sanitized, companyKey);
+    if (defaultsResult.applied) {
+      log("inject", `companyKey=${companyKey}, fields=${defaultsResult.appliedFields.join(",")}`, {
+        sources: defaultsResult.sources,
+      });
+    }
+
+    // 譌ｧ company_static 縺ｯ荳倶ｽ堺ｺ呈鋤縺ｨ縺励※谿九☆
+    const mergeResult = mergeCompanyStatic(sanitized, companyKey, ENABLE_COMPANY_STATIC);
+    if (mergeResult.staticApplied) {
+      log("company", "company_static 豕ｨ蜈･", { keys: mergeResult.staticAppliedKeys });
+    }
+
+    // 豕ｨ蜈･縺輔ｌ縺溘ヵ繧｣繝ｼ繝ｫ繝峨・荳隕ｧ・・aithfulness 髯､螟也畑・・
+    const injectedFields = [
+      ...defaultsResult.appliedFields,
+      ...mergeResult.staticAppliedKeys,
+    ];
+
+    if (sanitized.work.overtime && sanitized.work.overtime.exists === false && !sanitized.work.overtime.details) {
+      delete sanitized.work.overtime;
+    }
+
+    // --- B) 荳ｭ髢捺・譫懃黄繧貞・陦御ｿ晏ｭ假ｼ医ヰ繝ｪ繝・・繧ｷ繝ｧ繝ｳ螟ｱ謨励〒繧ょｿ・★谿九☆・・--
+    let artifactDir: string;
+    if (OUTPUT_DIR) {
+      artifactDir = OUTPUT_DIR;
+    } else {
+      const hash = makeHash(String(url ?? "") + normalized.slice(0, 200));
+      const companyPart = sanitizePathSegment(sanitized.company.name || "unknown");
+      const positionPart = sanitizePathSegment(sanitized.position.title || "unknown");
+      artifactDir = path.join(DATA_DIR, dateStr(), `${companyPart}_${positionPart}_${hash}`);
+    }
+    ensureDir(artifactDir);
+    log("generate", "蜃ｺ蜉帛・", { artifactDir });
+
+    if (rawHtml && typeof rawHtml === "string") {
+      fs.writeFileSync(path.join(artifactDir, "job_raw.html"), rawHtml, "utf8");
+    }
+    fs.writeFileSync(path.join(artifactDir, "job_raw.md"), normalized, "utf8");
+
+    const extractReport = {
+      url: url || null,
+      title: title || null,
+      siteHint: siteHint || null,
+      extractMeta: extractMeta ?? null,
+      extractedLength,
+      minExtractedChars: MIN_EXTRACTED_CHARS,
+      timestamp: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(artifactDir, "extract_report.json"), JSON.stringify(extractReport, null, 2), "utf8");
+
+    // 荳ｭ髢捺・譫懃黄菫晏ｭ假ｼ・ob.json + job_structured.md・・
+    saveIntermediateArtifacts(artifactDir, sanitized, normalized, typeof rawHtml === "string" ? rawHtml : undefined);
+
+    // --- 繝舌Μ繝・・繧ｷ繝ｧ繝ｳ ---
+    if (!sanitized.company?.name?.trim()) {
+      const reqResult = requiredFieldsCheck(sanitized);
+      saveMissingRequiredReport(artifactDir, reqResult, warnings, "讒矩蛹也ｵ先棡縺ｫ莨∵･ｭ蜷阪′縺ゅｊ縺ｾ縺帙ｓ縲・);
+      return res.status(400).json({
+        error: {
+          code: "JOB_JSON_EMPTY_OR_INVALID",
+          message: "讒矩蛹也ｵ先棡縺ｫ莨∵･ｭ蜷阪′縺ゅｊ縺ｾ縺帙ｓ縲・,
+          missing: ["company.name", ...reqResult.missingKeys],
+          details: reqResult.details,
+          warnings,
+        },
+      });
+    }
+    if (!sanitized.position?.title?.trim()) {
+      const reqResult = requiredFieldsCheck(sanitized);
+      saveMissingRequiredReport(artifactDir, reqResult, warnings, "讒矩蛹也ｵ先棡縺ｫ繝昴ず繧ｷ繝ｧ繝ｳ蜷阪′縺ゅｊ縺ｾ縺帙ｓ縲・);
+      return res.status(400).json({
+        error: {
+          code: "JOB_JSON_EMPTY_OR_INVALID",
+          message: "讒矩蛹也ｵ先棡縺ｫ繝昴ず繧ｷ繝ｧ繝ｳ蜷阪′縺ゅｊ縺ｾ縺帙ｓ縲・,
+          missing: ["position.title", ...reqResult.missingKeys],
+          details: reqResult.details,
+          warnings,
+        },
+      });
+    }
+
+    // 逵溘・蠢・域ｬ關ｽ繝√ぉ繝・け 窶・讌ｭ蜍吝・螳ｹ/蜍､蜍吝慍/雉・≡縺ｮ縺ｿ蛛懈ｭ｢
+    //   overrides / company_static 驕ｩ逕ｨ蠕後↓蛻､螳夲ｼ亥沂縺ｾ縺｣縺ｦ縺・ｌ縺ｰ騾夐℃・・
+    const reqResult = requiredFieldsCheck(sanitized);
+    if (!reqResult.ok) {
+      saveMissingRequiredReport(artifactDir, reqResult, warnings);
+      return res.status(400).json({
+        error: {
+          code: "REQUIRED_FIELD_MISSING",
+          message: `蠢・磯・岼縺悟叙蠕励〒縺阪∪縺帙ｓ: ${reqResult.missingKeys.join(", ")}`,
+          missing: reqResult.missingKeys,
+          details: reqResult.details,
+          warnings,
+        },
+      });
+    }
+
+    // 莉ｻ諢城・岼縺ｮ谺關ｽ隴ｦ蜻奇ｼ亥●豁｢縺励↑縺・ｼ・
+    const optResult = optionalFieldWarnings(sanitized);
+    if (optResult.warnings.length > 0) {
+      warnings.push(...optResult.warnings);
+      log("generate", "莉ｻ諢城・岼谺關ｽ・亥●豁｢縺ｪ縺暦ｼ・, { missing: optResult.warnings });
+    }
+
+    // faithfulness 繝√ぉ繝・け・亥ｸｸ縺ｫ隴ｦ蜻翫・縺ｿ 窶・蛛懈ｭ｢縺励↑縺・ｼ・
+    //   overrides / company_static 縺ｧ豕ｨ蜈･縺励◆繝輔ぅ繝ｼ繝ｫ繝峨・髯､螟・
+    const faithResult = faithfulnessCheck(sanitized, normalized, injectedFields);
+    const faithErrors = toFaithfulnessErrors(faithResult);
+
+    if (!faithResult.ok) {
+      log("generate", "險縺・鋤縺域､懷・・郁ｭｦ蜻奇ｼ・, { count: faithResult.missing.length });
+
+      // paraphrase_report.json 繧貞ｿ・★菫晏ｭ・
+      saveParaphraseReport(artifactDir, faithResult);
+
+      // 隴ｦ蜻翫→縺励※險倬鹸縺怜・逅・ｶ夊｡鯉ｼ亥●豁｢縺励↑縺・ｼ・
+      warnings.push(`PARAPHRASE_WARNING: 蜴滓枚縺ｨ逡ｰ縺ｪ繧玖｡ｨ迴ｾ縺ｮ蜿ｯ閭ｽ諤ｧ・・{faithResult.missing.length}莉ｶ・峨りｩｳ邏ｰ縺ｯ paraphrase_report.json 繧堤｢ｺ隱阪＠縺ｦ縺上□縺輔＞縲Ａ);
+    }
+
+    warnings.push(...buildWarnings(sanitized));
+    warnings.push(...sanitized.compliance.warnings);
+
+    const showFixedOvertime = hasFixedOvertimeKeywords(normalized);
+
+    // --- 譛邨よ・譫懃黄縺ｮ荳頑嶌縺堺ｿ晏ｭ假ｼ医ヰ繝ｪ繝・・繧ｷ繝ｧ繝ｳ騾夐℃蠕鯉ｼ・--
+    const structuredMd = buildStructuredMarkdown(sanitized, normalized);
+    fs.writeFileSync(path.join(artifactDir, "job_structured.md"), structuredMd, "utf8");
+
+    const jobWithMeta: Record<string, unknown> = { ...sanitized };
+    if (mergeResult.staticApplied) {
+      jobWithMeta.static_applied = true;
+      jobWithMeta.static_applied_keys = mergeResult.staticAppliedKeys;
+    }
+    // 逶｣譟ｻ逕ｨ: injected 繝｡繧ｿ繝・・繧ｿ
+    if (defaultsResult.applied) {
+      jobWithMeta.meta = {
+        injected: {
+          fields: defaultsResult.appliedFields,
+          sources: defaultsResult.sources,
+        },
+      };
+    }
+    fs.writeFileSync(path.join(artifactDir, "job.json"), JSON.stringify(jobWithMeta, null, 2), "utf8");
+
+    const meta = {
+      schemaVersion: "museum_jobposting_v0.3",
+      phase: "structured",
+      warnings,
+      faithViolations: faithErrors.length > 0 ? faithErrors : undefined,
+      showFixedOvertime,
+      url: url || undefined,
+      title: title || undefined,
+      jobTitle: typeof jobTitle === "string" ? jobTitle : undefined,
+      siteHint: siteHint || undefined,
+      extractedLength,
+      companyName: sanitized.company.displayName ?? sanitized.company.name,
+      companyNameOriginal: sanitized.company.name,
+      companyKey: companyKey ?? undefined,
+      provenance: Object.keys(mergeResult.provenance).length > 0 ? mergeResult.provenance : undefined,
+      injected: defaultsResult.applied
+        ? { fields: defaultsResult.appliedFields, sources: defaultsResult.sources, sourceUrl: defaultsResult.sourceUrl }
+        : undefined,
+      positionTitle: sanitized.position.title,
+      savedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(artifactDir, "meta.json"), JSON.stringify(meta, null, 2), "utf8");
+
+    const sessionId = toRunId(artifactDir);
+    log("generate", "菫晏ｭ伜ｮ御ｺ・, { sessionId });
+
+    // 繝ｬ繧ｹ繝昴Φ繧ｹ・域立莠呈鋤: sessionId 繧りｿ斐☆・・
+    return res.json({
+      runId: sessionId,
+      sessionId,
+      job: sanitized,
+      structuredMd,
+      suggestedFilename: buildSuggestedFilename(
+        typeof jobTitle === "string" ? jobTitle : typeof title === "string" ? title : undefined,
+        sanitized.position.title,
+        sanitized.company.displayName ?? sanitized.company.name
+      ),
+      meta: {
+        warnings,
+        faithViolations: faithErrors.length > 0 ? faithErrors : undefined,
+        showFixedOvertime,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    const detail = error instanceof Error ? error.message : String(error);
+    const status = (error as any)?.status ?? (error as any)?.response?.status;
+    let code = "INTERNAL_ERROR";
+    let message = "荳肴・縺ｪ繧ｨ繝ｩ繝ｼ縺檎匱逕溘＠縺ｾ縺励◆";
+    if (status === 429 || detail.includes("429") || detail.includes("quota")) {
+      code = "OPENAI_QUOTA_EXCEEDED";
+      message = "OpenAI API縺ｮ蛻ｩ逕ｨ荳企剞縺ｫ驕斐＠縺ｦ縺・∪縺吶・;
+    } else if (detail.includes("LLM_INVALID_JSON")) {
+      code = "LLM_INVALID_JSON";
+      message = "AI縺ｮ讒矩蛹也ｵ先棡縺御ｸ肴ｭ｣縺ｧ縺吶ゅｂ縺・ｸ蠎ｦ縺願ｩｦ縺励￥縺縺輔＞縲・;
+    } else if (detail) {
+      message = detail;
+    }
+    return res.status(500).json({ error: { code, message, detail } });
+  }
+});
+
+// 襍ｷ蜍墓凾縺ｫ菫晏ｭ伜・繝・ぅ繝ｬ繧ｯ繝医Μ繧堤｢ｺ隱・菴懈・
+try {
+  ensureStorageDirs();
+} catch (e) {
+  console.error("[storage] 菫晏ｭ伜・繝・ぅ繝ｬ繧ｯ繝医Μ菴懈・螟ｱ謨・", e);
+}
+
+app.listen(port, () => {
+  const cfg = loadStorageConfig();
+  console.log(`Museum JobTool Ver 0.3.6 窶・Server listening on port ${port}`);
+  console.log(`  jobDocxDir:   ${cfg.jobDocxDir}`);
+  console.log(`  scoutTextDir: ${cfg.scoutTextDir}`);
+  if (OUTPUT_DIR) console.log(`  OUTPUT_DIR: ${OUTPUT_DIR}`);
+  if (ENABLE_COMPANY_STATIC) console.log(`  ENABLE_COMPANY_STATIC: ON`);
+  if (STRICT_NO_PARAPHRASE) console.log(`  STRICT_NO_PARAPHRASE: ON (險縺・鋤縺域､懷・縺ｧ蛛懈ｭ｢)`);
+});
