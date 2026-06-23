@@ -152,7 +152,7 @@ export const requiredFieldsCheck = (job: JobPosting): RequiredFieldsResult => {
     return s.length > 80 ? s.slice(0, 80) + "…" : s;
   };
 
-  const responsibilities = (job.job.responsibilities ?? []).filter((x) => x.trim());
+  const responsibilities = (job.job.responsibilities ?? []).filter((x) => typeof x === "string" && x.trim());
   const checks: Array<{ key: string; jsonPath: string; present: boolean; value: unknown }> = [
     { key: "業務内容",   jsonPath: "job.responsibilities[]", present: responsibilities.length > 0, value: responsibilities },
     { key: "勤務地",     jsonPath: "work.location",          present: Boolean(job.work.location?.trim()), value: job.work.location },
@@ -193,7 +193,7 @@ export const optionalFieldWarnings = (job: JobPosting): OptionalFieldsResult => 
   const checks: Array<{ key: string; jsonPath: string; present: boolean }> = [
     { key: "就業時間",     jsonPath: "work.hours",             present: Boolean(job.work.hours?.trim()) },
     { key: "休日休暇",     jsonPath: "work.holidays",          present: Boolean(job.work.holidays?.trim()) },
-    { key: "福利厚生",     jsonPath: "benefits.items[]",       present: (job.benefits.items ?? []).filter((x) => x.trim()).length > 0 },
+    { key: "福利厚生",     jsonPath: "benefits.items[]",       present: (job.benefits.items ?? []).filter((x) => typeof x === "string" && x.trim()).length > 0 },
     { key: "社会保険",     jsonPath: "insurance.socialInsurance", present: Boolean(job.insurance.socialInsurance?.trim()) },
     { key: "選考プロセス", jsonPath: "selection.process",       present: Boolean(job.selection.process?.trim()) },
   ];

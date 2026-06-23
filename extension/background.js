@@ -76,6 +76,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           rawHtml: payload.rawHtml,
           url: payload.url,
           title: payload.title,
+          jobTitle: payload.jobTitle,
           siteHint: payload.siteHint,
           extractMeta: payload.extractMeta,
           extractedSections: payload.extractedSections,

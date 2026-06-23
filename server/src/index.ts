@@ -465,7 +465,7 @@ const buildSuggestedFilename = (_pageTitle: string | undefined, positionTitle: s
 };
 
 const listToMd = (items: string[] | undefined): string => {
-  const list = (items ?? []).filter((x) => x && x.trim() !== "");
+  const list = (items ?? []).filter((x) => typeof x === "string" && x.trim() !== "");
   if (list.length === 0) return "（記載なし）";
   return list.map((x) => `- ${x}`).join("\n");
 };
@@ -711,7 +711,7 @@ const buildStructuredMarkdown = (job: JobPosting, rawText?: string): string => {
     `### 必須`,
     listToMd(job.requirements.must),
     // 歓迎が空なら非表示（推測禁止）
-    ...(job.requirements.want.filter((x) => x.trim()).length > 0
+    ...(job.requirements.want.filter((x) => typeof x === "string" && x.trim()).length > 0
       ? [`### 歓迎`, listToMd(job.requirements.want)]
       : []),
     ``,
@@ -724,11 +724,11 @@ const buildStructuredMarkdown = (job: JobPosting, rawText?: string): string => {
     ``,
     `## 賃金（原文そのまま）`,
     `- 賃金: ${job.salary.summary || "（必須）"}`,
-    job.salary.details?.filter((x) => x.trim()).length > 0 ? `\n${listToMd(job.salary.details)}` : ``,
+    job.salary.details?.filter((x) => typeof x === "string" && x.trim()).length > 0 ? `\n${listToMd(job.salary.details)}` : ``,
     foLines.length > 0 ? `\n${foLines.join("\n")}` : ``,
     ``,
     // 福利厚生: 空なら非表示
-    ...(job.benefits.items.filter((x) => x.trim()).length > 0
+    ...(job.benefits.items.filter((x) => typeof x === "string" && x.trim()).length > 0
       ? [`## 福利厚生（原文そのまま）`, listToMd(job.benefits.items), ``]
       : []),
     // 社会保険: 空なら非表示
@@ -967,10 +967,11 @@ app.post("/api/structure", async (req, res) => {
         const secData = JSON.parse(fs.readFileSync(sectionsPath, "utf8"));
         domSectionsForEvidence = secData.sections ?? [];
         const compSec = domSectionsForEvidence.find((s) => s.label === "会社名");
-        if (compSec && compSec.value.trim()) {
-          sanitized.company.name = compSec.value.trim();
+        const compSecVal = typeof compSec?.value === "string" ? compSec.value.trim() : "";
+        if (compSecVal) {
+          sanitized.company.name = compSecVal;
           evidenceSkipFields.add("company.name");
-          log("field_source", `company.name source=sections (DOM優先)`, { value: compSec.value.trim() });
+          log("field_source", `company.name source=sections (DOM優先)`, { value: compSecVal });
         }
       }
     } catch { /* sections 読み込み失敗時は OpenAI フォールバック */ }
@@ -995,8 +996,9 @@ app.post("/api/structure", async (req, res) => {
             // HRMOS: selection.process は DOM sections からのみ許可
             if (canonicalField === "selection.process" && siteHint === "HRMOS") {
               // DOM section にある場合のみ、値があれば設定
-              if (!sanitized.selection.process?.trim() && sec.value.trim()) {
-                sanitized.selection.process = sec.value.trim();
+              const secVal = typeof sec.value === "string" ? sec.value.trim() : "";
+              if (!sanitized.selection.process?.trim() && secVal) {
+                sanitized.selection.process = secVal;
                 fieldSourceLog.push({ field: "selection.process", source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
                 log("field_source", `selection.process source=sections label=${sec.label}`, { snippet: sec.value.slice(0, 120) });
               }
@@ -1005,10 +1007,11 @@ app.post("/api/structure", async (req, res) => {
 
             // 汎用: OpenAI が抽出できなかったフィールドを sections で補完
             const current = getNestedValue(sanitized, canonicalField);
-            if (!current || (typeof current === "string" && !current.trim())) {
-              setNestedValue(sanitized, canonicalField, sec.value.trim());
-              fieldSourceLog.push({ field: canonicalField, source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
-              log("field_source", `${canonicalField} source=sections label=${sec.label}`, { snippet: sec.value.slice(0, 120) });
+            const secValue = typeof sec.value === "string" ? sec.value.trim() : "";
+            if (secValue && (!current || (typeof current === "string" && !current.trim()))) {
+              setNestedValue(sanitized, canonicalField, secValue);
+              fieldSourceLog.push({ field: canonicalField, source: "sections", label: sec.label, snippet: secValue.slice(0, 120) });
+              log("field_source", `${canonicalField} source=sections label=${sec.label}`, { snippet: secValue.slice(0, 120) });
             } else {
               fieldSourceLog.push({ field: canonicalField, source: "openai", snippet: (typeof current === "string" ? current : "").slice(0, 120) });
             }
@@ -1585,10 +1588,11 @@ app.post("/api/generate", async (req, res) => {
     const genEvidenceSkipFields = new Set<string>();
     if (Array.isArray(mergedGenSections)) {
       const compSec = mergedGenSections.find((s: { label: string; value?: string }) => s.label === "会社名");
-      if (compSec && compSec.value?.trim()) {
-        sanitized.company.name = compSec.value.trim();
+      const genCompVal = typeof compSec?.value === "string" ? compSec.value.trim() : "";
+      if (genCompVal) {
+        sanitized.company.name = genCompVal;
         genEvidenceSkipFields.add("company.name");
-        log("field_source", `company.name source=sections (DOM優先)`, { value: compSec.value.trim() });
+        log("field_source", `company.name source=sections (DOM優先)`, { value: genCompVal });
       }
     }
 
@@ -1610,17 +1614,19 @@ app.post("/api/generate", async (req, res) => {
         const canonicalField = aliases[sec.label] ?? null;
         if (!canonicalField) continue;
         if (canonicalField === "selection.process" && genSiteHint === "HRMOS") {
-          if (!sanitized.selection.process?.trim() && sec.value?.trim()) {
-            sanitized.selection.process = sec.value.trim();
-            genFieldSourceLog.push({ field: "selection.process", source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
+          const genSecVal = typeof sec.value === "string" ? sec.value.trim() : "";
+          if (!sanitized.selection.process?.trim() && genSecVal) {
+            sanitized.selection.process = genSecVal;
+            genFieldSourceLog.push({ field: "selection.process", source: "sections", label: sec.label, snippet: genSecVal.slice(0, 120) });
           }
           continue;
         }
         const current = getNestedValue(sanitized as unknown as Record<string, unknown>, canonicalField);
-        if (!current || (typeof current === "string" && !current.trim())) {
-          setNestedValue(sanitized as unknown as Record<string, unknown>, canonicalField, sec.value.trim());
-          genFieldSourceLog.push({ field: canonicalField, source: "sections", label: sec.label, snippet: sec.value.slice(0, 120) });
-          log("field_source", `${canonicalField} source=sections label=${sec.label}`, { snippet: sec.value.slice(0, 120) });
+        const genSecValue = typeof sec.value === "string" ? sec.value.trim() : "";
+        if (genSecValue && (!current || (typeof current === "string" && !current.trim()))) {
+          setNestedValue(sanitized as unknown as Record<string, unknown>, canonicalField, genSecValue);
+          genFieldSourceLog.push({ field: canonicalField, source: "sections", label: sec.label, snippet: genSecValue.slice(0, 120) });
+          log("field_source", `${canonicalField} source=sections label=${sec.label}`, { snippet: genSecValue.slice(0, 120) });
         }
       }
       if (genSiteHint === "HRMOS" && sanitized.selection.process?.trim()) {
