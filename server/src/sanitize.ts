@@ -25,6 +25,7 @@ const walk = (value: unknown, detected: string[]): unknown => {
   }
   if (Array.isArray(value)) {
     return value
+      .filter((item) => item != null)
       .map((item) => walk(item, detected))
       .filter((item) => typeof item !== "string" || item.trim() !== "");
   }
